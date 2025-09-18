@@ -29,6 +29,19 @@ const authRoutes = async(fastify, options) => {
 
         return rep.code(200).send({ message: "OTP sent", otp });
     });
+
+    fastify.post("/verify-otp", async(req, rep) => {
+        const { email, otp } = req.body;
+        const user = await users().findOne({ email });
+
+        if (!user || user.otp !== otp) {
+            return rep.code(400).send({ error: "Invalid OTP" });
+        }
+
+        await users().updateOne({ email }, { $set: { verified: true }, $unset: { otp: "" } });
+
+        return rep.code(200).send({ message: "Email verified" });
+    });
 };
 
 export default authRoutes;
