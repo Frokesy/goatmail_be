@@ -6,6 +6,7 @@
     "type": "module",
     "dependencies": {
         "@fastify/mongodb": "^9.0.2",
+        "@plunk/node": "^3.0.3",
         "axios": "^1.12.2",
         "bcrypt": "^6.0.0",
         "dotenv": "^17.2.2",
