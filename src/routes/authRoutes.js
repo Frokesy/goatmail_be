@@ -63,40 +63,45 @@ const authRoutes = async(fastify, options) => {
 
         return { message: "Password set successfully" };
     });
+
+    fastify.post("/set-incoming-server", async(req, reply) => {
+        const { email, serverType, serverName, password, port, security } =
+        req.body;
+
+        if (!email ||
+            !serverType ||
+            !serverName ||
+            !password ||
+            !port ||
+            !security
+        ) {
+            return reply.code(400).send({ error: "All fields are required" });
+        }
+
+        const user = await users().findOne({ email });
+        if (!user) return reply.code(404).send({ error: "User not found" });
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        await users().updateOne({ email }, {
+            $set: {
+                incomingServer: {
+                    serverType,
+                    serverName,
+                    password: hashedPassword,
+                    port,
+                    security,
+                },
+            },
+        });
+
+        return reply
+            .code(200)
+            .send({ message: "Incoming server saved successfully" });
+    });
 };
 
 export default authRoutes;
-
-// // src/routes/auth.js
-
-// export default async function authRoutes(fastify, opts) {
-//   const users = () => fastify.mongo.db.collection("users");
-
-//   fastify.post("/signup", async (req, reply) => {
-//     const { email } = req.body;
-
-//     const existing = await users().findOne({ email });
-//     if (existing) return reply.code(400).send({ error: "User exists" });
-
-//     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-//     await users().insertOne({ email, otp, verified: false, createdAt: new Date() });
-
-//     return { message: "OTP sent", otp }; // return otp in dev
-//   });
-
-//   fastify.post("/verify-otp", async (req, reply) => {
-//     const { email, otp } = req.body;
-//     const user = await users().findOne({ email });
-
-//     if (!user || user.otp !== otp) {
-//       return reply.code(400).send({ error: "Invalid OTP" });
-//     }
-
-//     await users().updateOne({ email }, { $set: { verified: true }, $unset: { otp: "" } });
-
-//     return { message: "Email verified" };
-//   });
 
 //   fastify.post("/login", async (req, reply) => {
 //     const { email, password } = req.body;
