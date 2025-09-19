@@ -6,6 +6,8 @@ dotenv.config();
 const require = createRequire(
     import.meta.url);
 const { sendOtpEmail } = require("../utils/email/sendOtp.js");
+import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
 
 const authRoutes = async(fastify, options) => {
     const users = () => fastify.mongo.db.collection("users");
@@ -47,13 +49,25 @@ const authRoutes = async(fastify, options) => {
 
         return rep.code(200).send({ message: "Email verified" });
     });
+
+    fastify.post("/set-password", async(req, reply) => {
+        const { email, password } = req.body;
+        const user = await users().findOne({ email });
+
+        if (!user || !user.verified) {
+            return reply.code(400).send({ error: "Email not verified" });
+        }
+
+        const hashed = await bcrypt.hash(password, 10);
+        await users().updateOne({ email }, { $set: { password: hashed } });
+
+        return { message: "Password set successfully" };
+    });
 };
 
 export default authRoutes;
 
 // // src/routes/auth.js
-// import bcrypt from "bcrypt";
-// import jwt from "jsonwebtoken";
 
 // export default async function authRoutes(fastify, opts) {
 //   const users = () => fastify.mongo.db.collection("users");
@@ -82,20 +96,6 @@ export default authRoutes;
 //     await users().updateOne({ email }, { $set: { verified: true }, $unset: { otp: "" } });
 
 //     return { message: "Email verified" };
-//   });
-
-//   fastify.post("/set-password", async (req, reply) => {
-//     const { email, password } = req.body;
-//     const user = await users().findOne({ email });
-
-//     if (!user || !user.verified) {
-//       return reply.code(400).send({ error: "Email not verified" });
-//     }
-
-//     const hashed = await bcrypt.hash(password, 10);
-//     await users().updateOne({ email }, { $set: { password: hashed } });
-
-//     return { message: "Password set successfully" };
 //   });
 
 //   fastify.post("/login", async (req, reply) => {
