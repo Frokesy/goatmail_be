@@ -1,20 +1,23 @@
 import Fastify from "fastify";
-import connectDB from "./db.js";
+import fastifyMongodb from "@fastify/mongodb";
 import authRoutes from "./routes/authRoutes.js";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const fastify = Fastify({
-    logger: true,
+const fastify = Fastify({ logger: true });
+
+fastify.register(fastifyMongodb, {
+    forceClose: true,
+    url: process.env.MONGO_URI,
 });
 
-fastify.register(connectDB);
-fastify.register(authRoutes);
+fastify.register(authRoutes, { prefix: "/api/auth" });
 
-try {
-    await fastify.listen({ port: 3000 });
-} catch (error) {
-    fastify.log.error(error);
-    process.exit(1);
-}
+fastify.listen({ port: 3000, host: "0.0.0.0" }, (err, address) => {
+    if (err) {
+        fastify.log.error(err);
+        process.exit(1);
+    }
+    console.log(`Server listening at ${address}`);
+});
