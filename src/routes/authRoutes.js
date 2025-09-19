@@ -99,6 +99,33 @@ const authRoutes = async(fastify, options) => {
             .code(200)
             .send({ message: "Incoming server saved successfully" });
     });
+
+    fastify.post("/set-outgoing-server", async(req, reply) => {
+        const { email, smtpServer, password, port, securityType } = req.body;
+
+        if (!email) return reply.code(400).send({ error: "Email is required" });
+
+        const user = await users().findOne({ email });
+
+        if (!user || !user.verified) {
+            return reply.code(400).send({ error: "Email not verified" });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        await users().updateOne({ email }, {
+            $set: {
+                outgoingEmail: {
+                    smtpServer,
+                    password: hashedPassword,
+                    port,
+                    securityType,
+                },
+            },
+        });
+
+        return { message: "Outgoing email server saved successfully" };
+    });
 };
 
 export default authRoutes;
