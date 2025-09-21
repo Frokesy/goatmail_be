@@ -40,6 +40,26 @@ const authRoutes = async(fastify, options) => {
         return rep.code(200).send({ message: "OTP sent", otp });
     });
 
+    fastify.post("/resend-otp", async(req, reply) => {
+        const { email } = req.body;
+        if (!email) return reply.code(400).send({ error: "Email is required" });
+
+        const user = await users().findOne({ email });
+        if (!user) return reply.code(404).send({ error: "User not found" });
+
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        await users().updateOne({ email }, { $set: { otp, verified: false } });
+
+        try {
+            await sendOtpEmail(email, otp);
+        } catch (err) {
+            console.error("Error sending OTP:", err);
+            return reply.code(500).send({ error: "Failed to send OTP" });
+        }
+
+        return reply.code(200).send({ message: "OTP resent", otp });
+    });
+
     fastify.post("/verify-otp", async(req, rep) => {
         const { email, otp } = req.body;
         const user = await users().findOne({ email });
