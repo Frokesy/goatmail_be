@@ -7,6 +7,8 @@ const require = createRequire(
     import.meta.url);
 const { sendOtpEmail } = require("../utils/email/sendOtp.js");
 import bcrypt from "bcrypt";
+import speakeasy from "speakeasy";
+import QRCode from "qrcode";
 import jwt from "jsonwebtoken";
 
 const authRoutes = async(fastify, options) => {
@@ -125,6 +127,58 @@ const authRoutes = async(fastify, options) => {
         });
 
         return { message: "Outgoing email server saved successfully" };
+    });
+
+    fastify.get("/2fa/setup", async(req, reply) => {
+        const { email } = req.query;
+        if (!email) return reply.code(400).send({ error: "Email is required" });
+
+        const user = await users().findOne({ email });
+        if (!user) return reply.code(404).send({ error: "User not found" });
+
+        const secret = speakeasy.generateSecret({ length: 20 });
+
+        await users().updateOne({ email }, { $set: { twoFASecret: secret.base32 } });
+
+        const otpauthUrl = speakeasy.otpauthURL({
+            secret: secret.ascii,
+            label: `Goatmail:${email}`,
+            issuer: "Goatmail",
+        });
+
+        const qrCodeDataURL = await QRCode.toDataURL(otpauthUrl);
+
+        return { secret: secret.base32, qrCode: qrCodeDataURL };
+    });
+
+    fastify.post("/2fa/verify", async(req, reply) => {
+        const { email, token } = req.body;
+
+        const user = await users().findOne({ email });
+        if (!user || !user.twoFASecret)
+            return reply.code(400).send({ error: "2FA not set up" });
+
+        const verified = speakeasy.totp.verify({
+            secret: user.twoFASecret,
+            encoding: "base32",
+            token,
+            window: 1,
+        });
+
+        if (!verified) return reply.code(400).send({ error: "Invalid 2FA code" });
+
+        await users().updateOne({ email }, { $set: { twoFAEnabled: true } });
+        return { message: "2FA enabled successfully" };
+    });
+
+    fastify.post("/recovery-email", async(req, reply) => {
+        const { email, recoveryEmail } = req.body;
+        if (!email || !recoveryEmail)
+            return reply.code(400).send({ error: "Missing fields" });
+
+        await users().updateOne({ email }, { $set: { recoveryEmail } });
+
+        return { success: true };
     });
 };
 
