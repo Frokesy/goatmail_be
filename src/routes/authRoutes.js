@@ -180,6 +180,34 @@ const authRoutes = async(fastify, options) => {
 
         return { success: true };
     });
+
+    fastify.post("/subscribe", async(req, reply) => {
+        try {
+            const { email, plan, billingCycle, cost } = req.body;
+            if (!email || !plan) {
+                return reply
+                    .status(400)
+                    .send({ message: "Email and plan are required" });
+            }
+
+            const subscription = {
+                email,
+                plan,
+                billingCycle,
+                cost,
+                subscribedAt: new Date(),
+            };
+
+            await users().updateOne({ email }, { $set: { subscription } });
+            return reply.status(200).send({
+                message: "Subscription successful",
+                subscription,
+            });
+        } catch (err) {
+            request.log.error(err);
+            return reply.status(500).send({ message: "Server error" });
+        }
+    });
 };
 
 export default authRoutes;
