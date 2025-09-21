@@ -13,6 +13,7 @@ import jwt from "jsonwebtoken";
 
 const authRoutes = async(fastify, options) => {
     const users = () => fastify.mongo.db.collection("users");
+    const plansCollection = fastify.mongo.db.collection("plans");
 
     fastify.post("/signup", async(req, rep) => {
         const { email } = req.body;
@@ -206,6 +207,20 @@ const authRoutes = async(fastify, options) => {
         } catch (err) {
             request.log.error(err);
             return reply.status(500).send({ message: "Server error" });
+        }
+    });
+
+    fastify.get("/plans", async(req, reply) => {
+        try {
+            const plans = await plansCollection.findOne({});
+            if (!plans) {
+                return reply.status(404).send({ error: "No plans found" });
+            }
+
+            return reply.send(plans);
+        } catch (err) {
+            req.log.error(err);
+            return reply.status(500).send({ error: "Failed to fetch plans" });
         }
     });
 };
