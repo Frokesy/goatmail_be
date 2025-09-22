@@ -297,27 +297,24 @@ const authRoutes = async(fastify, options) => {
             reply.status(500).send({ error: "Unable to create payment sheet" });
         }
     });
+
+    fastify.post("/login", async(req, reply) => {
+        const { email, password } = req.body;
+        const user = await users().findOne({ email });
+
+        if (!user || !user.password) {
+            return reply.code(400).send({ error: "Invalid credentials" });
+        }
+
+        const match = await bcrypt.compare(password, user.password);
+        if (!match) return reply.code(400).send({ error: "Invalid credentials" });
+
+        const token = jwt.sign({ userId: user._id, email: user.email },
+            process.env.JWT_SECRET, { expiresIn: "1h" }
+        );
+
+        return { message: "Login successful", token };
+    });
 };
 
 export default authRoutes;
-
-//   fastify.post("/login", async (req, reply) => {
-//     const { email, password } = req.body;
-//     const user = await users().findOne({ email });
-
-//     if (!user || !user.password) {
-//       return reply.code(400).send({ error: "Invalid credentials" });
-//     }
-
-//     const match = await bcrypt.compare(password, user.password);
-//     if (!match) return reply.code(400).send({ error: "Invalid credentials" });
-
-//     const token = jwt.sign(
-//       { userId: user._id, email: user.email },
-//       process.env.JWT_SECRET,
-//       { expiresIn: "1h" }
-//     );
-
-//     return { message: "Login successful", token };
-//   });
-// }
