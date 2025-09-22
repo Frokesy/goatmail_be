@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { createRequire } from "module";
+import Stripe from "stripe";
 
 dotenv.config();
 
@@ -9,6 +10,9 @@ const { sendOtpEmail } = require("../utils/email/sendOtp.js");
 import bcrypt from "bcrypt";
 import speakeasy from "speakeasy";
 import QRCode from "qrcode";
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+    apiVersion: "2025-01-27.acacia",
+});
 import jwt from "jsonwebtoken";
 
 const authRoutes = async(fastify, options) => {
@@ -241,6 +245,56 @@ const authRoutes = async(fastify, options) => {
         } catch (err) {
             req.log.error(err);
             return reply.status(500).send({ error: "Failed to fetch plans" });
+        }
+    });
+
+    fastify.post("/payment-sheet", async(req, reply) => {
+        try {
+            const { priceId, email } = req.body;
+
+            if (!priceId || !email) {
+                return reply.status(400).send({ error: "Missing priceId or email" });
+            }
+
+            let customer = (await stripe.customers.list({ email, limit: 1 })).data[0];
+            if (!customer) {
+                customer = await stripe.customers.create({ email });
+            }
+
+            const subscription = await stripe.subscriptions.create({
+                customer: customer.id,
+                items: [{ price: priceId }],
+                payment_behavior: "default_incomplete",
+                expand: ["latest_invoice.payment_intent"],
+            });
+
+            let paymentIntent = subscription.latest_invoice.payment_intent;
+
+            if (!paymentIntent && subscription.latest_invoice) {
+                const invoice = await stripe.invoices.retrieve(
+                    subscription.latest_invoice, {
+                        expand: ["payment_intent"],
+                    }
+                );
+                paymentIntent = invoice.payment_intent;
+            }
+
+            if (!paymentIntent) {
+                throw new Error("Could not create PaymentIntent for subscription");
+            }
+
+            const ephemeralKey = await stripe.ephemeralKeys.create({ customer: customer.id }, { apiVersion: "2025-01-27.acacia" });
+
+            return reply.send({
+                paymentIntentClientSecret: paymentIntent.client_secret,
+                ephemeralKey: ephemeralKey.secret,
+                customer: customer.id,
+                publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
+                subscriptionId: subscription.id,
+            });
+        } catch (err) {
+            console.error("Error creating payment sheet:", err);
+            reply.status(500).send({ error: "Unable to create payment sheet" });
         }
     });
 };

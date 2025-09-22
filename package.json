@@ -18,6 +18,7 @@
         "nodemailer": "^7.0.6",
         "nodemon": "^3.1.10",
         "qrcode": "^1.5.4",
-        "speakeasy": "^2.0.0"
+        "speakeasy": "^2.0.0",
+        "stripe": "^18.5.0"
     }
 }
