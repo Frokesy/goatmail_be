@@ -2,6 +2,8 @@ import Fastify from "fastify";
 import fastifyMongodb from "@fastify/mongodb";
 import authRoutes from "./routes/authRoutes.js";
 import dotenv from "dotenv";
+import userRoutes from "./routes/userRoutes.js";
+import authPlugin from "./plugins/auth.js";
 
 dotenv.config();
 
@@ -12,7 +14,9 @@ fastify.register(fastifyMongodb, {
     url: process.env.MONGO_URI,
 });
 
+fastify.register(authPlugin);
 fastify.register(authRoutes, { prefix: "/api/auth" });
+fastify.register(userRoutes, { prefix: "/api" });
 
 fastify.listen({ port: 3000, host: "0.0.0.0" }, (err, address) => {
     if (err) {

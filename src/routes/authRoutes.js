@@ -13,7 +13,6 @@ import QRCode from "qrcode";
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
     apiVersion: "2025-01-27.acacia",
 });
-import jwt from "jsonwebtoken";
 
 const authRoutes = async(fastify, options) => {
     const users = () => fastify.mongo.db.collection("users");
@@ -309,11 +308,9 @@ const authRoutes = async(fastify, options) => {
         const match = await bcrypt.compare(password, user.password);
         if (!match) return reply.code(400).send({ error: "Invalid credentials" });
 
-        const token = jwt.sign({ userId: user._id, email: user.email },
-            process.env.JWT_SECRET, { expiresIn: "1h" }
-        );
+        const token = fastify.jwt.sign({ userId: user._id, email: user.email }, { expiresIn: "1h" });
 
-        return { message: "Login successful", token };
+        return { message: "Login successful", token, email };
     });
 };
 
