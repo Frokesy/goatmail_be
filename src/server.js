@@ -1,11 +1,10 @@
+import dotenv from "dotenv";
+dotenv.config();
 import Fastify from "fastify";
 import fastifyMongodb from "@fastify/mongodb";
 import authRoutes from "./routes/authRoutes.js";
-import dotenv from "dotenv";
 import userRoutes from "./routes/userRoutes.js";
 import authPlugin from "./plugins/auth.js";
-
-dotenv.config();
 
 const fastify = Fastify({ logger: true });
 

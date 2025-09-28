@@ -1,8 +1,7 @@
 import dotenv from "dotenv";
+dotenv.config();
 import { createRequire } from "module";
 import Stripe from "stripe";
-
-dotenv.config();
 
 const require = createRequire(
     import.meta.url);
@@ -13,13 +12,14 @@ import QRCode from "qrcode";
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
     apiVersion: "2025-01-27.acacia",
 });
+import { encrypt } from "../utils/cryptoUtils.js";
 
 const authRoutes = async(fastify, options) => {
     const users = () => fastify.mongo.db.collection("users");
     const plansCollection = fastify.mongo.db.collection("plans");
 
     fastify.post("/signup", async(req, rep) => {
-        const { email } = req.body;
+        const { name, email } = req.body;
 
         const existingUser = await users().findOne({ email });
         if (existingUser) return rep.code(400).send({ error: "User exists" });
@@ -27,6 +27,7 @@ const authRoutes = async(fastify, options) => {
         const otp = Math.floor(100000 + Math.random() * 900000).toString();
 
         await users().insertOne({
+            name,
             email,
             otp,
             verified: false,
@@ -107,14 +108,14 @@ const authRoutes = async(fastify, options) => {
         const user = await users().findOne({ email });
         if (!user) return reply.code(404).send({ error: "User not found" });
 
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const encryptedPassword = encrypt(password);
 
         await users().updateOne({ email }, {
             $set: {
                 incomingServer: {
                     serverType,
                     serverName,
-                    password: hashedPassword,
+                    password: encryptedPassword,
                     port,
                     security,
                 },
@@ -137,13 +138,13 @@ const authRoutes = async(fastify, options) => {
             return reply.code(400).send({ error: "Email not verified" });
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
+        const encryptedPassword = encrypt(password);
 
         await users().updateOne({ email }, {
             $set: {
                 outgoingEmail: {
                     smtpServer,
-                    password: hashedPassword,
+                    password: encryptedPassword,
                     port,
                     securityType,
                 },
