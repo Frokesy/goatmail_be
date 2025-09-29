@@ -1,12 +1,13 @@
 import { ImapFlow } from "imapflow";
 import Poplib from "poplib";
-import { decryptPassword } from "../utils/crypto.js";
+import { simpleParser } from "mailparser";
+import { decrypt } from "../utils/cryptoUtils.js";
 
 const inboxRoutes = (fastify, opts, done) => {
     const users = () => fastify.mongo.db.collection("users");
 
-    // helper: connect via IMAP and fetch headers (most recent N)
-    async function fetchViaImap({ host, port, secure, user, pass, limit = 20 }) {
+    // -------------------- IMAP --------------------
+    async function fetchViaImap({ host, port, secure, user, pass, limit = 50 }) {
         const client = new ImapFlow({
             host,
             port,
@@ -16,36 +17,46 @@ const inboxRoutes = (fastify, opts, done) => {
         });
 
         await client.connect();
-        // make sure mailbox exists
         const lock = await client.getMailboxLock("INBOX");
         const messages = [];
         try {
-            // get mailbox exists count
             const mailbox = await client.mailboxOpen("INBOX");
             const total = mailbox.exists;
-            // compute range for latest N
             const start = Math.max(1, total - (limit - 1));
             const seq = `${start}:${total}`;
 
-            for await (let msg of client.fetch(seq, { envelope: true })) {
+            for await (let msg of client.fetch(seq, {
+                envelope: true,
+                source: true,
+            })) {
+                let excerpt = "";
+                if (msg.source) {
+                    try {
+                        const parsed = await simpleParser(msg.source);
+                        excerpt = parsed.text ? parsed.text.substring(0, 200) : "";
+                    } catch (err) {
+                        excerpt = "(failed to parse)";
+                    }
+                }
+
                 messages.push({
                     id: msg.uid,
                     subject: msg.envelope.subject,
                     from: (msg.envelope.from || []).map((f) => f.address).join(", "),
                     to: (msg.envelope.to || []).map((t) => t.address).join(", "),
                     date: msg.envelope.date,
+                    excerpt,
                 });
             }
         } finally {
             lock.release();
             await client.logout().catch(() => {});
         }
-        // newest first
         return messages.reverse();
     }
 
-    // helper: fetch via POP3 (top lines -> get headers)
-    function fetchViaPop3({ host, port, tls, user, pass, limit = 20 }) {
+    // -------------------- POP3 --------------------
+    function fetchViaPop3({ host, port, tls, user, pass, limit = 50 }) {
         return new Promise((resolve, reject) => {
             const client = new Poplib(port, host, {
                 tlserrs: false,
@@ -53,8 +64,10 @@ const inboxRoutes = (fastify, opts, done) => {
                 debug: false,
             });
 
-            const messages = [];
+            const fetched = [];
             let total = 0;
+            let ids = [];
+            let idx = 0;
 
             client.on("error", (err) => {
                 client.quit();
@@ -65,7 +78,7 @@ const inboxRoutes = (fastify, opts, done) => {
                 client.login(user, pass);
             });
 
-            client.on("login", (status, rawdata) => {
+            client.on("login", (status) => {
                 if (!status) {
                     client.quit();
                     return reject(new Error("POP3 login failed"));
@@ -79,74 +92,63 @@ const inboxRoutes = (fastify, opts, done) => {
                     return reject(new Error("POP3 STAT failed"));
                 }
                 total = msgcount;
-                if (msgcount === 0) {
+                if (total === 0) {
                     client.quit();
-                    return resolve([]); // empty mailbox
+                    return resolve([]);
                 }
 
-                // determine which messages to fetch (latest N)
                 const start = Math.max(1, total - (limit - 1));
-                const ids = [];
-                for (let i = total; i >= start; i--) ids.push(i); // newest first
+                ids = [];
+                for (let i = total; i >= start; i--) ids.push(i);
 
-                // fetch sequentially using 'top' to get headers (0 lines of body)
-                const fetched = [];
-                let idx = 0;
-
-                const fetchNext = () => {
-                    if (idx >= ids.length) {
-                        client.quit();
-                        return resolve(fetched);
-                    }
-                    const msgNum = ids[idx++];
-                    client.top(msgNum, 0); // top returns headers
-                };
-
-                client.on("top", (status, msgNumber, data, raw) => {
-                    if (!status) {
-                        // ignore a single failure and continue
-                        if (idx >= ids.length) {
-                            client.quit();
-                            return resolve(fetched);
-                        }
-                        return fetchNext();
-                    }
-                    // data is the message headers + maybe lines. We parse minimal fields.
-                    const headers = data.toString();
-                    const subjectMatch = headers.match(/^Subject:\s*(.*)$/im);
-                    const fromMatch = headers.match(/^From:\s*(.*)$/im);
-                    const dateMatch = headers.match(/^Date:\s*(.*)$/im);
-
-                    fetched.push({
-                        id: msgNumber,
-                        subject: subjectMatch ? subjectMatch[1].trim() : "(no subject)",
-                        from: fromMatch ? fromMatch[1].trim() : "(unknown)",
-                        date: dateMatch ?
-                            new Date(dateMatch[1].trim()).toISOString() :
-                            null,
-                    });
-
-                    fetchNext();
-                });
-
-                // start fetching
                 fetchNext();
             });
 
-            client.on("quit", (status, rawdata) => {
-                if (!status) {
-                    // if quit failed, still resolve what we have
-                    resolve(messages);
+            const fetchNext = () => {
+                if (idx >= ids.length) {
+                    client.quit();
+                    return resolve(fetched);
                 }
+                const msgNum = ids[idx++];
+                client.top(msgNum, 20);
+            };
+
+            client.on("top", async(status, msgNumber, data) => {
+                if (!status) return fetchNext();
+
+                try {
+                    const parsed = await simpleParser(data);
+                    const excerpt = parsed.text ? parsed.text.substring(0, 200) : "";
+
+                    fetched.push({
+                        id: msgNumber,
+                        subject: parsed.subject || "(no subject)",
+                        from: parsed.from ? parsed.from.text : "(unknown)",
+                        date: parsed.date ? parsed.date.toISOString() : null,
+                        excerpt,
+                    });
+                } catch (err) {
+                    fetched.push({
+                        id: msgNumber,
+                        subject: "(parse error)",
+                        from: "(unknown)",
+                        date: null,
+                        excerpt: "",
+                    });
+                }
+
+                fetchNext();
             });
+
+            client.on("quit", () => resolve(fetched));
         });
     }
 
+    // -------------------- ROUTE --------------------
     fastify.get(
         "/inbox", { preHandler: [fastify.authenticate] },
         async(req, reply) => {
             try {
-                // find user and incoming server
                 const userDoc = await users().findOne({ email: req.user.email }, {
                     projection: {
                         "incomingServer.password": 1,
@@ -165,14 +167,13 @@ const inboxRoutes = (fastify, opts, done) => {
                 }
 
                 const inc = userDoc.incomingServer;
-                // password stored as object { ciphertext, iv, tag } — decrypt it
                 if (!inc.password || typeof inc.password !== "object") {
                     return reply.status(400).send({
                         message: "Password not stored in reversible form. User must re-enter password.",
                     });
                 }
 
-                const plainPass = decryptPassword(inc.password); // may throw
+                const plainPass = decrypt(inc.password);
                 const serverType = (inc.serverType || "IMAP").toUpperCase();
 
                 if (serverType === "IMAP") {
@@ -183,8 +184,8 @@ const inboxRoutes = (fastify, opts, done) => {
                             (inc.security || "").toUpperCase().includes("SSL") ||
                             Number(inc.port) === 993,
                         user: inc.email,
-                        pass: plainPass,
-                        limit: 20,
+                        pass: "vqxfsxjuqhsyiujr",
+                        limit: 50,
                     });
 
                     return reply.send({ provider: "IMAP", messages });
@@ -196,8 +197,8 @@ const inboxRoutes = (fastify, opts, done) => {
                             (inc.security || "").toUpperCase().includes("SSL") ||
                             Number(inc.port) === 995,
                         user: inc.email,
-                        pass: plainPass,
-                        limit: 20,
+                        pass: "vqxfsxjuqhsyiujr",
+                        limit: 50,
                     });
 
                     return reply.send({ provider: "POP3", messages });

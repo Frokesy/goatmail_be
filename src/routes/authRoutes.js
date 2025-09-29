@@ -128,6 +128,52 @@ const authRoutes = async(fastify, options) => {
             .send({ message: "Incoming server saved successfully" });
     });
 
+    fastify.post("/update-incoming-server", async(req, reply) => {
+        try {
+            const { email, serverType, serverName, password, port, security } =
+            req.body;
+
+            if (!email) {
+                return reply.code(400).send({ error: "Email is required" });
+            }
+
+            const user = await users().findOne({ email });
+            if (!user) {
+                return reply.code(404).send({ error: "User not found" });
+            }
+
+            if (!user.incomingServer) {
+                return reply
+                    .code(400)
+                    .send({ error: "Incoming server configuration not found" });
+            }
+
+            const updateFields = {};
+
+            if (serverType) updateFields["incomingServer.serverType"] = serverType;
+            if (serverName) updateFields["incomingServer.serverName"] = serverName;
+            if (port) updateFields["incomingServer.port"] = port;
+            if (security) updateFields["incomingServer.security"] = security;
+            if (password) updateFields["incomingServer.password"] = encrypt(password);
+
+            if (Object.keys(updateFields).length === 0) {
+                return reply.code(400).send({ error: "No fields provided to update" });
+            }
+
+            await users().updateOne({ email }, { $set: updateFields });
+
+            return reply.code(200).send({
+                message: "Incoming server updated successfully",
+                updatedFields: Object.keys(updateFields),
+            });
+        } catch (err) {
+            req.log.error(err);
+            return reply
+                .code(500)
+                .send({ error: "Failed to update incoming server" });
+        }
+    });
+
     fastify.post("/set-outgoing-server", async(req, reply) => {
         const { email, smtpServer, password, port, securityType } = req.body;
 
@@ -311,7 +357,7 @@ const authRoutes = async(fastify, options) => {
         const match = await bcrypt.compare(password, user.password);
         if (!match) return reply.code(400).send({ error: "Invalid credentials" });
 
-        const token = fastify.jwt.sign({ userId: user._id, email: user.email }, { expiresIn: "1h" });
+        const token = fastify.jwt.sign({ userId: user._id, email: user.email }, { expiresIn: "7d" });
 
         return { message: "Login successful", token, email };
     });

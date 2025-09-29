@@ -5,6 +5,8 @@ import fastifyMongodb from "@fastify/mongodb";
 import authRoutes from "./routes/authRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import authPlugin from "./plugins/auth.js";
+import inboxRoutes from "./routes/inboxRoutes.js";
+import incomingServerRoutes from "./routes/incomingServerRoutes.js";
 
 const fastify = Fastify({ logger: true });
 
@@ -16,6 +18,8 @@ fastify.register(fastifyMongodb, {
 fastify.register(authPlugin);
 fastify.register(authRoutes, { prefix: "/api/auth" });
 fastify.register(userRoutes, { prefix: "/api" });
+fastify.register(inboxRoutes, { prefix: "/api" });
+fastify.register(incomingServerRoutes, { prefix: "/api" });
 
 fastify.listen({ port: 3000, host: "0.0.0.0" }, (err, address) => {
     if (err) {
