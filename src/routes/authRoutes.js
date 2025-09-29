@@ -113,6 +113,7 @@ const authRoutes = async(fastify, options) => {
         await users().updateOne({ email }, {
             $set: {
                 incomingServer: {
+                    email,
                     serverType,
                     serverName,
                     password: encryptedPassword,
@@ -143,6 +144,7 @@ const authRoutes = async(fastify, options) => {
         await users().updateOne({ email }, {
             $set: {
                 outgoingEmail: {
+                    email,
                     smtpServer,
                     password: encryptedPassword,
                     port,
