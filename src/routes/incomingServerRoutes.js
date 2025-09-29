@@ -1,3 +1,5 @@
+import { decrypt } from "../utils/cryptoUtils.js";
+
 export default async function incomingServerRoutes(fastify) {
     fastify.get(
         "/incoming-server", { preValidation: [fastify.authenticate] },

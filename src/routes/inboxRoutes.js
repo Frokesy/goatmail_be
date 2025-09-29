@@ -6,6 +6,17 @@ import { decrypt } from "../utils/cryptoUtils.js";
 const inboxRoutes = (fastify, opts, done) => {
     const users = () => fastify.mongo.db.collection("users");
 
+    // Utility to clean excerpts
+    function cleanExcerpt(text) {
+        if (!text) return "";
+        return text
+            .replace(/\[image:[^\]]+\]/gi, "") // remove [image: ...]
+            .replace(/\.{3,}/g, "...") // collapse long dot sequences
+            .replace(/\s+/g, " ") // normalize whitespace
+            .trim()
+            .substring(0, 200);
+    }
+
     // -------------------- IMAP --------------------
     async function fetchViaImap({ host, port, secure, user, pass, limit = 50 }) {
         const client = new ImapFlow({
@@ -33,17 +44,18 @@ const inboxRoutes = (fastify, opts, done) => {
                 if (msg.source) {
                     try {
                         const parsed = await simpleParser(msg.source);
-                        excerpt = parsed.text ? parsed.text.substring(0, 200) : "";
-                    } catch (err) {
+                        excerpt = cleanExcerpt(parsed.text || "");
+                    } catch {
                         excerpt = "(failed to parse)";
                     }
                 }
 
                 messages.push({
                     id: msg.uid,
-                    subject: msg.envelope.subject,
-                    from: (msg.envelope.from || []).map((f) => f.address).join(", "),
-                    to: (msg.envelope.to || []).map((t) => t.address).join(", "),
+                    subject: msg.envelope.subject || "(no subject)",
+                    from: (msg.envelope.from || [])
+                        .map((f) => f.name || f.address || "(unknown)")
+                        .join(", "),
                     date: msg.envelope.date,
                     excerpt,
                 });
@@ -74,33 +86,23 @@ const inboxRoutes = (fastify, opts, done) => {
                 reject(err);
             });
 
-            client.on("connect", () => {
-                client.login(user, pass);
-            });
+            client.on("connect", () => client.login(user, pass));
 
             client.on("login", (status) => {
-                if (!status) {
-                    client.quit();
-                    return reject(new Error("POP3 login failed"));
-                }
+                if (!status) return reject(new Error("POP3 login failed"));
                 client.stat();
             });
 
             client.on("stat", (status, msgcount) => {
-                if (!status) {
-                    client.quit();
-                    return reject(new Error("POP3 STAT failed"));
-                }
+                if (!status) return reject(new Error("POP3 STAT failed"));
                 total = msgcount;
                 if (total === 0) {
                     client.quit();
                     return resolve([]);
                 }
-
                 const start = Math.max(1, total - (limit - 1));
                 ids = [];
                 for (let i = total; i >= start; i--) ids.push(i);
-
                 fetchNext();
             });
 
@@ -118,7 +120,7 @@ const inboxRoutes = (fastify, opts, done) => {
 
                 try {
                     const parsed = await simpleParser(data);
-                    const excerpt = parsed.text ? parsed.text.substring(0, 200) : "";
+                    const excerpt = cleanExcerpt(parsed.text || "");
 
                     fetched.push({
                         id: msgNumber,
@@ -127,7 +129,7 @@ const inboxRoutes = (fastify, opts, done) => {
                         date: parsed.date ? parsed.date.toISOString() : null,
                         excerpt,
                     });
-                } catch (err) {
+                } catch {
                     fetched.push({
                         id: msgNumber,
                         subject: "(parse error)",
@@ -136,7 +138,6 @@ const inboxRoutes = (fastify, opts, done) => {
                         excerpt: "",
                     });
                 }
-
                 fetchNext();
             });
 
@@ -144,7 +145,6 @@ const inboxRoutes = (fastify, opts, done) => {
         });
     }
 
-    // -------------------- ROUTE --------------------
     fastify.get(
         "/inbox", { preHandler: [fastify.authenticate] },
         async(req, reply) => {
@@ -157,6 +157,7 @@ const inboxRoutes = (fastify, opts, done) => {
                         "incomingServer.port": 1,
                         "incomingServer.security": 1,
                         "incomingServer.email": 1,
+                        starredMails: 1, // include starred mails field
                     },
                 });
 
@@ -176,8 +177,9 @@ const inboxRoutes = (fastify, opts, done) => {
                 const plainPass = decrypt(inc.password);
                 const serverType = (inc.serverType || "IMAP").toUpperCase();
 
+                let fetched = [];
                 if (serverType === "IMAP") {
-                    const messages = await fetchViaImap({
+                    fetched = await fetchViaImap({
                         host: inc.serverName,
                         port: Number(inc.port),
                         secure:
@@ -187,10 +189,8 @@ const inboxRoutes = (fastify, opts, done) => {
                         pass: "vqxfsxjuqhsyiujr",
                         limit: 50,
                     });
-
-                    return reply.send({ provider: "IMAP", messages });
                 } else if (serverType === "POP3") {
-                    const messages = await fetchViaPop3({
+                    fetched = await fetchViaPop3({
                         host: inc.serverName,
                         port: Number(inc.port),
                         tls:
@@ -200,17 +200,50 @@ const inboxRoutes = (fastify, opts, done) => {
                         pass: "vqxfsxjuqhsyiujr",
                         limit: 50,
                     });
-
-                    return reply.send({ provider: "POP3", messages });
                 } else {
                     return reply
                         .status(400)
                         .send({ message: "Unsupported incoming server type" });
                 }
+
+                // ⭐ Mark starred mails
+                const starredSet = new Set(userDoc.starredMails || []);
+                const messages = fetched.map((msg) => ({
+                    ...msg,
+                    starred: starredSet.has(msg.id.toString()),
+                }));
+
+                return reply.send({ provider: serverType, messages });
             } catch (err) {
                 fastify.log.error("Inbox error:", err);
                 return reply.status(500).send({ error: err.message });
             }
+        }
+    );
+
+    fastify.post(
+        "/star-mail", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            const { mailId } = req.body;
+
+            if (!mailId) {
+                return reply.code(400).send({ error: "mailId is required" });
+            }
+
+            await users().updateOne({ email: req.user.email }, { $addToSet: { starredMails: mailId.toString() } });
+
+            return reply.send({ success: true, mailId });
+        }
+    );
+
+    fastify.delete(
+        "/unstar-mail/:mailId", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            const { mailId } = req.params;
+
+            await users().updateOne({ email: req.user.email }, { $pull: { starredMails: mailId.toString() } });
+
+            return reply.send({ success: true, mailId });
         }
     );
 
