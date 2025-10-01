@@ -1,5 +1,8 @@
+import dotenv from "dotenv";
+dotenv.config();
 import SMTPConnection from "smtp-connection";
 import { decrypt } from "../utils/cryptoUtils.js";
+import { ObjectId } from "mongodb";
 
 const sendMailRoutes = (fastify, opts, done) => {
         const users = () => fastify.mongo.db.collection("users");
@@ -9,7 +12,7 @@ const sendMailRoutes = (fastify, opts, done) => {
                 "/send-email", { preHandler: [fastify.authenticate] },
                 async(req, reply) => {
                     try {
-                        const { to, cc, bcc, subject, body, name } = req.body;
+                        const { to, cc, bcc, subject, body, name, track } = req.body;
 
                         if (!to || !subject || !body) {
                             return reply.status(400).send({ error: "Missing required fields" });
@@ -25,30 +28,53 @@ const sendMailRoutes = (fastify, opts, done) => {
                             },
                         });
 
-                        if (!userDoc || !userDoc.outgoingEmail)
+                        if (!userDoc || !userDoc.outgoingEmail) {
                             return reply
                                 .status(404)
                                 .send({ message: "SMTP details not configured" });
+                        }
 
                         const out = userDoc.outgoingEmail;
-                        if (!out.password || typeof out.password !== "object")
+                        if (!out.password || typeof out.password !== "object") {
                             return reply.status(400).send({
                                 message: "Password not stored in reversible form. User must re-enter password.",
                             });
+                        }
 
                         const plainPass = decrypt(out.password);
 
-                        // Create SMTP connection (credentials will be passed at login step)
+                        // 🔹 Tracking injection
+                        let finalBody = body;
+                        let trackingId;
+                        if (track) {
+                            trackingId = new ObjectId().toString();
+                            const pixelUrl = `${process.env.API_URL}/tracking/open/${trackingId}`;
+                            const trackingPixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none" />`;
+
+                            finalBody += `\n\n${trackingPixel}`;
+
+                            // Wrap links for click tracking
+                            finalBody = finalBody.replace(
+                                /(https?:\/\/[^\s]+)/g,
+                                (url) =>
+                                `${
+                process.env.API_URL
+              }/tracking/click/${trackingId}?redirect=${encodeURIComponent(
+                url
+              )}`
+                            );
+                        }
+
+                        // 🔹 Create SMTP connection (handles SSL & STARTTLS safely)
                         const connection = new SMTPConnection({
                             host: out.smtpServer,
                             port: Number(out.port),
                             secure:
                                 (out.securityType || "").toUpperCase().includes("SSL") ||
-                                Number(out.port) === 465, // SSL usually 465
-                            tls: { rejectUnauthorized: false },
+                                Number(out.port) === 465,
+                            tls: { rejectUnauthorized: false }, // allow self-signed
                         });
 
-                        // Helpers
                         const connectPromise = () =>
                             new Promise((resolve, reject) => {
                                 connection.connect((err) => {
@@ -59,7 +85,11 @@ const sendMailRoutes = (fastify, opts, done) => {
 
                         const loginPromise = () =>
                             new Promise((resolve, reject) => {
-                                connection.login({ user: out.email, pass: "vqxfsxjuqhsyiujr" || plainPass },
+                                connection.login({
+                                        user: out.email,
+                                        // 🔹 keep your hardcoded password
+                                        pass: "vqxfsxjuqhsyiujr",
+                                    },
                                     (err) => {
                                         if (err) reject(err);
                                         else resolve(true);
@@ -78,13 +108,21 @@ const sendMailRoutes = (fastify, opts, done) => {
                                         .concat(bcc || [])
                                         .filter(Boolean);
 
+                                    // 🔹 Proper MIME message
                                     const message = `From: ${fromHeader}
 To: ${Array.isArray(to) ? to.join(", ") : to}
 ${
   cc ? `Cc: ${Array.isArray(cc) ? cc.join(", ") : cc}\n` : ""
 }Subject: ${subject}
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
 
-${body}
+<html>
+  <body>
+    ${finalBody}
+  </body>
+</html>
 `;
 
             connection.send(
@@ -103,16 +141,17 @@ ${body}
             resolve(true);
           });
 
-        // Flow
+        // 🔹 Flow
         await connectPromise();
         await loginPromise();
         const info = await sendPromise();
         await quitPromise();
 
-        // Save sent email to DB
-        await sent().insertOne({
+        // 🔹 Save to DB
+        const emailDoc = {
           userId: userDoc._id,
           from: out.email,
+          senderName: name,
           to,
           cc,
           bcc,
@@ -120,7 +159,15 @@ ${body}
           body,
           sentAt: new Date(),
           smtpInfo: info,
-        });
+        };
+
+        if (track) {
+          emailDoc.trackingId = trackingId;
+          emailDoc.opened = false;
+          emailDoc.clicks = [];
+        }
+
+        await sent().insertOne(emailDoc);
 
         return reply.send({ success: true, info });
       } catch (err) {
@@ -129,6 +176,51 @@ ${body}
       }
     }
   );
+
+  // 🔹 Tracking routes
+  fastify.get("/tracking/open/:id", async (req, reply) => {
+    const { id } = req.params;
+
+    await sent().updateOne(
+      { trackingId: id },
+      {
+        $set: { opened: true },
+        $push: {
+          openEvents: {
+            time: new Date(),
+            ip: req.ip,
+            ua: req.headers["user-agent"],
+          },
+        },
+      }
+    );
+
+    reply
+      .header(
+        "Cache-Control",
+        "no-store, no-cache, must-revalidate, proxy-revalidate"
+      )
+      .header("Pragma", "no-cache")
+      .header("Expires", "0")
+      .header("Surrogate-Control", "no-store");
+
+    // return 1x1 transparent gif
+    const pixel = Buffer.from(
+      "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+      "base64"
+    );
+    reply.header("Content-Type", "image/gif").send(pixel);
+  });
+
+  fastify.get("/tracking/click/:id", async (req, reply) => {
+    const { id } = req.params;
+    const { redirect } = req.query;
+    await sent().updateOne(
+      { trackingId: id },
+      { $push: { clicks: { url: redirect, time: new Date() } } }
+    );
+    reply.redirect(redirect);
+  });
 
   done();
 };
