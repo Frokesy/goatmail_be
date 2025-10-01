@@ -14,6 +14,7 @@
         "dotenv": "^17.2.2",
         "fastify": "^5.6.0",
         "fastify-cors": "^6.0.3",
+        "fastify-multipart": "^5.3.1",
         "fastify-plugin": "^5.0.1",
         "imap": "^0.8.19",
         "imapflow": "^1.0.197",
@@ -25,6 +26,7 @@
         "nodemon": "^3.1.10",
         "poplib": "^0.1.7",
         "qrcode": "^1.5.4",
+        "smtp-connection": "^4.0.2",
         "speakeasy": "^2.0.0",
         "stripe": "^18.5.0"
     }

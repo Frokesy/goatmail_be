@@ -7,6 +7,7 @@ import userRoutes from "./routes/userRoutes.js";
 import authPlugin from "./plugins/auth.js";
 import inboxRoutes from "./routes/inboxRoutes.js";
 import incomingServerRoutes from "./routes/incomingServerRoutes.js";
+import sendMailRoutes from "./routes/sendMailRoutes.js";
 
 const fastify = Fastify({ logger: true });
 
@@ -20,6 +21,7 @@ fastify.register(authRoutes, { prefix: "/api/auth" });
 fastify.register(userRoutes, { prefix: "/api" });
 fastify.register(inboxRoutes, { prefix: "/api" });
 fastify.register(incomingServerRoutes, { prefix: "/api" });
+fastify.register(sendMailRoutes, { prefix: "/api" });
 
 fastify.listen({ port: 3000, host: "0.0.0.0" }, (err, address) => {
     if (err) {
