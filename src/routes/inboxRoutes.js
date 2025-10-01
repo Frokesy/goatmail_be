@@ -6,18 +6,17 @@ import { decrypt } from "../utils/cryptoUtils.js";
 const inboxRoutes = (fastify, opts, done) => {
     const users = () => fastify.mongo.db.collection("users");
 
-    // Utility to clean excerpts
     function cleanExcerpt(text) {
         if (!text) return "";
         return text
-            .replace(/\[image:[^\]]+\]/gi, "") // remove [image: ...]
-            .replace(/\.{3,}/g, "...") // collapse long dot sequences
-            .replace(/\s+/g, " ") // normalize whitespace
+            .replace(/\[image:[^\]]+\]/gi, "")
+            .replace(/\.{3,}/g, "...")
+            .replace(/\s+/g, " ")
             .trim()
             .substring(0, 200);
     }
 
-    // -------------------- IMAP --------------------
+    // -------------------- IMAP: Fetch Inbox --------------------
     async function fetchViaImap({ host, port, secure, user, pass, limit = 50 }) {
         const client = new ImapFlow({
             host,
@@ -26,10 +25,10 @@ const inboxRoutes = (fastify, opts, done) => {
             auth: { user, pass },
             logger: false,
         });
-
         await client.connect();
         const lock = await client.getMailboxLock("INBOX");
         const messages = [];
+
         try {
             const mailbox = await client.mailboxOpen("INBOX");
             const total = mailbox.exists;
@@ -41,12 +40,23 @@ const inboxRoutes = (fastify, opts, done) => {
                 source: true,
             })) {
                 let excerpt = "";
+                let bodyText = "";
+                let toField = "";
+
                 if (msg.source) {
                     try {
                         const parsed = await simpleParser(msg.source);
                         excerpt = cleanExcerpt(parsed.text || "");
+                        bodyText = parsed.text || "";
+                        if (parsed.to) {
+                            toField = parsed.to.value
+                                .map((t) => t.name || t.address)
+                                .join(", ");
+                        }
                     } catch {
                         excerpt = "(failed to parse)";
+                        bodyText = "";
+                        toField = "";
                     }
                 }
 
@@ -56,15 +66,78 @@ const inboxRoutes = (fastify, opts, done) => {
                     from: (msg.envelope.from || [])
                         .map((f) => f.name || f.address || "(unknown)")
                         .join(", "),
+                    to: toField,
                     date: msg.envelope.date,
                     excerpt,
+                    body: bodyText,
                 });
             }
         } finally {
             lock.release();
             await client.logout().catch(() => {});
         }
+
         return messages.reverse();
+    }
+
+    // -------------------- IMAP: Fetch Single Mail --------------------
+    async function fetchSingleImap({ host, port, secure, user, pass, uid }) {
+        const client = new ImapFlow({
+            host,
+            port,
+            secure,
+            auth: { user, pass },
+            logger: false,
+        });
+
+        await client.connect();
+        const lock = await client.getMailboxLock("INBOX");
+
+        try {
+            const messages = [];
+            for await (const msg of client.fetch({ uid: Number(uid) }, { source: true, envelope: true })) {
+                let bodyHtml = "";
+                let excerpt = "";
+                let toField = "";
+
+                if (msg.source) {
+                    const parsed = await simpleParser(msg.source);
+
+                    // Use HTML for body so links and images render
+                    bodyHtml = parsed.html || parsed.textAsHtml || parsed.text || "";
+
+                    // Excerpt from plain text only
+                    const textForExcerpt = parsed.text || parsed.textAsHtml || "";
+                    excerpt = textForExcerpt
+                        .replace(/\s+/g, " ")
+                        .trim()
+                        .substring(0, 200);
+
+                    if (parsed.to) {
+                        toField = parsed.to.value
+                            .map((t) => t.name || t.address)
+                            .join(", ");
+                    }
+                }
+
+                messages.push({
+                    id: msg.uid,
+                    subject: msg.envelope.subject || "(no subject)",
+                    from: (msg.envelope.from || [])
+                        .map((f) => f.name || f.address || "(unknown)")
+                        .join(", "),
+                    to: toField,
+                    date: msg.envelope.date,
+                    excerpt,
+                    body: bodyHtml,
+                });
+            }
+
+            return messages[0] || null;
+        } finally {
+            lock.release();
+            await client.logout().catch(() => {});
+        }
     }
 
     // -------------------- POP3 --------------------
@@ -75,7 +148,6 @@ const inboxRoutes = (fastify, opts, done) => {
                 enabletls: tls,
                 debug: false,
             });
-
             const fetched = [];
             let total = 0;
             let ids = [];
@@ -85,14 +157,11 @@ const inboxRoutes = (fastify, opts, done) => {
                 client.quit();
                 reject(err);
             });
-
             client.on("connect", () => client.login(user, pass));
-
             client.on("login", (status) => {
                 if (!status) return reject(new Error("POP3 login failed"));
                 client.stat();
             });
-
             client.on("stat", (status, msgcount) => {
                 if (!status) return reject(new Error("POP3 STAT failed"));
                 total = msgcount;
@@ -117,17 +186,16 @@ const inboxRoutes = (fastify, opts, done) => {
 
             client.on("top", async(status, msgNumber, data) => {
                 if (!status) return fetchNext();
-
                 try {
                     const parsed = await simpleParser(data);
                     const excerpt = cleanExcerpt(parsed.text || "");
-
                     fetched.push({
                         id: msgNumber,
                         subject: parsed.subject || "(no subject)",
                         from: parsed.from ? parsed.from.text : "(unknown)",
                         date: parsed.date ? parsed.date.toISOString() : null,
                         excerpt,
+                        body: parsed.text || "",
                     });
                 } catch {
                     fetched.push({
@@ -136,6 +204,7 @@ const inboxRoutes = (fastify, opts, done) => {
                         from: "(unknown)",
                         date: null,
                         excerpt: "",
+                        body: "",
                     });
                 }
                 fetchNext();
@@ -145,6 +214,7 @@ const inboxRoutes = (fastify, opts, done) => {
         });
     }
 
+    // -------------------- Routes --------------------
     fastify.get(
         "/inbox", { preHandler: [fastify.authenticate] },
         async(req, reply) => {
@@ -157,22 +227,20 @@ const inboxRoutes = (fastify, opts, done) => {
                         "incomingServer.port": 1,
                         "incomingServer.security": 1,
                         "incomingServer.email": 1,
-                        starredMails: 1, // include starred mails field
+                        starredMails: 1,
                     },
                 });
 
-                if (!userDoc || !userDoc.incomingServer) {
+                if (!userDoc || !userDoc.incomingServer)
                     return reply
                         .status(404)
                         .send({ message: "Incoming server not configured" });
-                }
 
                 const inc = userDoc.incomingServer;
-                if (!inc.password || typeof inc.password !== "object") {
+                if (!inc.password || typeof inc.password !== "object")
                     return reply.status(400).send({
                         message: "Password not stored in reversible form. User must re-enter password.",
                     });
-                }
 
                 const plainPass = decrypt(inc.password);
                 const serverType = (inc.serverType || "IMAP").toUpperCase();
@@ -200,13 +268,11 @@ const inboxRoutes = (fastify, opts, done) => {
                         pass: "vqxfsxjuqhsyiujr",
                         limit: 50,
                     });
-                } else {
+                } else
                     return reply
                         .status(400)
                         .send({ message: "Unsupported incoming server type" });
-                }
 
-                // ⭐ Mark starred mails
                 const starredSet = new Set(userDoc.starredMails || []);
                 const messages = fetched.map((msg) => ({
                     ...msg,
@@ -221,17 +287,92 @@ const inboxRoutes = (fastify, opts, done) => {
         }
     );
 
+    fastify.get(
+        "/mail/:uid", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            try {
+                const uid = Number(req.params.uid); // Convert to number
+                if (isNaN(uid)) return reply.code(400).send({ error: "Invalid UID" });
+
+                const userDoc = await users().findOne({ email: req.user.email }, {
+                    projection: {
+                        "incomingServer.password": 1,
+                        "incomingServer.serverType": 1,
+                        "incomingServer.serverName": 1,
+                        "incomingServer.port": 1,
+                        "incomingServer.security": 1,
+                        "incomingServer.email": 1,
+                        starredMails: 1,
+                    },
+                });
+
+                if (!userDoc || !userDoc.incomingServer)
+                    return reply
+                        .status(404)
+                        .send({ message: "Incoming server not configured" });
+
+                const inc = userDoc.incomingServer;
+                if (!inc.password || typeof inc.password !== "object")
+                    return reply.status(400).send({
+                        message: "Password not stored in reversible form. User must re-enter password.",
+                    });
+
+                const plainPass = decrypt(inc.password);
+                const serverType = (inc.serverType || "IMAP").toUpperCase();
+
+                let mail;
+                if (serverType === "IMAP") {
+                    mail = await fetchSingleImap({
+                        host: inc.serverName,
+                        port: Number(inc.port),
+                        secure:
+                            (inc.security || "").toUpperCase().includes("SSL") ||
+                            Number(inc.port) === 993,
+                        user: inc.email,
+                        pass: "vqxfsxjuqhsyiujr",
+                        uid,
+                    });
+
+                    if (!mail)
+                        return reply.status(404).send({ message: "Mail not found" });
+                } else if (serverType === "POP3") {
+                    const fetched = await fetchViaPop3({
+                        host: inc.serverName,
+                        port: Number(inc.port),
+                        tls:
+                            (inc.security || "").toUpperCase().includes("SSL") ||
+                            Number(inc.port) === 995,
+                        user: inc.email,
+                        pass: "vqxfsxjuqhsyiujr",
+                        limit: 50,
+                    });
+                    mail = fetched.find((m) => Number(m.id) === uid);
+                    if (!mail)
+                        return reply.status(404).send({ message: "Mail not found" });
+                } else {
+                    return reply
+                        .status(400)
+                        .send({ message: "Unsupported incoming server type" });
+                }
+
+                mail.starred = (userDoc.starredMails || []).includes(
+                    mail.id.toString()
+                );
+                return reply.send({ mail, provider: serverType });
+            } catch (err) {
+                fastify.log.error("Fetch mail error:", err);
+                return reply.status(500).send({ error: err.message });
+            }
+        }
+    );
+
     fastify.post(
         "/star-mail", { preHandler: [fastify.authenticate] },
         async(req, reply) => {
             const { mailId } = req.body;
-
-            if (!mailId) {
-                return reply.code(400).send({ error: "mailId is required" });
-            }
+            if (!mailId) return reply.code(400).send({ error: "mailId is required" });
 
             await users().updateOne({ email: req.user.email }, { $addToSet: { starredMails: mailId.toString() } });
-
             return reply.send({ success: true, mailId });
         }
     );
@@ -240,9 +381,7 @@ const inboxRoutes = (fastify, opts, done) => {
         "/unstar-mail/:mailId", { preHandler: [fastify.authenticate] },
         async(req, reply) => {
             const { mailId } = req.params;
-
             await users().updateOne({ email: req.user.email }, { $pull: { starredMails: mailId.toString() } });
-
             return reply.send({ success: true, mailId });
         }
     );

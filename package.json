@@ -15,6 +15,7 @@
         "fastify": "^5.6.0",
         "fastify-cors": "^6.0.3",
         "fastify-plugin": "^5.0.1",
+        "imap": "^0.8.19",
         "imapflow": "^1.0.197",
         "jsonwebtoken": "^9.0.2",
         "mailparser": "^3.7.4",
