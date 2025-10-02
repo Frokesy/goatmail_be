@@ -214,6 +214,81 @@ const inboxRoutes = (fastify, opts, done) => {
         });
     }
 
+    // --------------------Fetch and Filter Helper --------------------
+    async function fetchAndFilterMails(req, reply, fastify, fieldName, flagName) {
+        try {
+            const userDoc = await users().findOne({ email: req.user.email }, {
+                projection: {
+                    "incomingServer.password": 1,
+                    "incomingServer.serverType": 1,
+                    "incomingServer.serverName": 1,
+                    "incomingServer.port": 1,
+                    "incomingServer.security": 1,
+                    "incomingServer.email": 1,
+                    [fieldName]: 1,
+                },
+            });
+
+            if (!userDoc || !userDoc.incomingServer) {
+                return reply
+                    .status(404)
+                    .send({ message: "Incoming server not configured" });
+            }
+
+            const inc = userDoc.incomingServer;
+            if (!inc.password || typeof inc.password !== "object") {
+                return reply.status(400).send({
+                    message: "Password not stored in reversible form. User must re-enter password.",
+                });
+            }
+
+            const plainPass = decrypt(inc.password);
+            const serverType = (inc.serverType || "IMAP").toUpperCase();
+
+            let fetched = [];
+            if (serverType === "IMAP") {
+                fetched = await fetchViaImap({
+                    host: inc.serverName,
+                    port: Number(inc.port),
+                    secure:
+                        (inc.security || "").toUpperCase().includes("SSL") ||
+                        Number(inc.port) === 993,
+                    user: inc.email,
+                    pass: plainPass,
+                    limit: 100,
+                });
+            } else if (serverType === "POP3") {
+                fetched = await fetchViaPop3({
+                    host: inc.serverName,
+                    port: Number(inc.port),
+                    tls:
+                        (inc.security || "").toUpperCase().includes("SSL") ||
+                        Number(inc.port) === 995,
+                    user: inc.email,
+                    pass: plainPass,
+                    limit: 100,
+                });
+            } else {
+                return reply
+                    .status(400)
+                    .send({ message: "Unsupported incoming server type" });
+            }
+
+            const idSet = new Set(userDoc[fieldName] || []);
+            const messages = fetched
+                .filter((msg) => idSet.has(msg.id.toString()))
+                .map((msg) => ({
+                    ...msg,
+                    [flagName]: true,
+                }));
+
+            return reply.send({ provider: serverType, messages });
+        } catch (err) {
+            fastify.log.error(`${flagName} fetch error:`, err);
+            return reply.status(500).send({ error: err.message });
+        }
+    }
+
     // -------------------- Routes --------------------
     fastify.get(
         "/inbox", { preHandler: [fastify.authenticate] },
@@ -306,79 +381,22 @@ const inboxRoutes = (fastify, opts, done) => {
     // -------------------- Fetch Starred Emails --------------------
     fastify.get(
         "/starred", { preHandler: [fastify.authenticate] },
-        async(req, reply) => {
-            try {
-                const userDoc = await users().findOne({ email: req.user.email }, {
-                    projection: {
-                        "incomingServer.password": 1,
-                        "incomingServer.serverType": 1,
-                        "incomingServer.serverName": 1,
-                        "incomingServer.port": 1,
-                        "incomingServer.security": 1,
-                        "incomingServer.email": 1,
-                        starredMails: 1,
-                    },
-                });
+        (req, reply) =>
+        fetchAndFilterMails(req, reply, fastify, "starredMails", "starred")
+    );
 
-                if (!userDoc || !userDoc.incomingServer) {
-                    return reply
-                        .status(404)
-                        .send({ message: "Incoming server not configured" });
-                }
+    // -------------------- Fetch Archived Emails --------------------
+    fastify.get(
+        "/archived", { preHandler: [fastify.authenticate] },
+        (req, reply) =>
+        fetchAndFilterMails(req, reply, fastify, "archivedMails", "archived")
+    );
 
-                const inc = userDoc.incomingServer;
-                if (!inc.password || typeof inc.password !== "object") {
-                    return reply.status(400).send({
-                        message: "Password not stored in reversible form. User must re-enter password.",
-                    });
-                }
-
-                const plainPass = decrypt(inc.password);
-                const serverType = (inc.serverType || "IMAP").toUpperCase();
-
-                let fetched = [];
-                if (serverType === "IMAP") {
-                    fetched = await fetchViaImap({
-                        host: inc.serverName,
-                        port: Number(inc.port),
-                        secure:
-                            (inc.security || "").toUpperCase().includes("SSL") ||
-                            Number(inc.port) === 993,
-                        user: inc.email,
-                        pass: plainPass,
-                        limit: 100,
-                    });
-                } else if (serverType === "POP3") {
-                    fetched = await fetchViaPop3({
-                        host: inc.serverName,
-                        port: Number(inc.port),
-                        tls:
-                            (inc.security || "").toUpperCase().includes("SSL") ||
-                            Number(inc.port) === 995,
-                        user: inc.email,
-                        pass: plainPass,
-                        limit: 100,
-                    });
-                } else {
-                    return reply
-                        .status(400)
-                        .send({ message: "Unsupported incoming server type" });
-                }
-
-                const starredSet = new Set(userDoc.starredMails || []);
-                const messages = fetched
-                    .filter((msg) => starredSet.has(msg.id.toString()))
-                    .map((msg) => ({
-                        ...msg,
-                        starred: true,
-                    }));
-
-                return reply.send({ provider: serverType, messages });
-            } catch (err) {
-                fastify.log.error("Starred fetch error:", err);
-                return reply.status(500).send({ error: err.message });
-            }
-        }
+    // -------------------- Fetch Deleted Emails --------------------
+    fastify.get(
+        "/deleted", { preHandler: [fastify.authenticate] },
+        (req, reply) =>
+        fetchAndFilterMails(req, reply, fastify, "deletedMails", "deleted")
     );
 
     fastify.get(
