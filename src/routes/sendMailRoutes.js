@@ -88,7 +88,7 @@ const sendMailRoutes = (fastify, opts, done) => {
                                 connection.login({
                                         user: out.email,
                                         // 🔹 keep your hardcoded password
-                                        pass: "vqxfsxjuqhsyiujr",
+                                        pass: plainPass,
                                     },
                                     (err) => {
                                         if (err) reject(err);

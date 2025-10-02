@@ -254,7 +254,7 @@ const inboxRoutes = (fastify, opts, done) => {
                             (inc.security || "").toUpperCase().includes("SSL") ||
                             Number(inc.port) === 993,
                         user: inc.email,
-                        pass: "vqxfsxjuqhsyiujr",
+                        pass: plainPass,
                         limit: 50,
                     });
                 } else if (serverType === "POP3") {
@@ -265,7 +265,7 @@ const inboxRoutes = (fastify, opts, done) => {
                             (inc.security || "").toUpperCase().includes("SSL") ||
                             Number(inc.port) === 995,
                         user: inc.email,
-                        pass: "vqxfsxjuqhsyiujr",
+                        pass: plainPass,
                         limit: 50,
                     });
                 } else
@@ -287,11 +287,89 @@ const inboxRoutes = (fastify, opts, done) => {
         }
     );
 
+    // -------------------- Fetch Starred Emails --------------------
+    fastify.get(
+        "/starred", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            try {
+                const userDoc = await users().findOne({ email: req.user.email }, {
+                    projection: {
+                        "incomingServer.password": 1,
+                        "incomingServer.serverType": 1,
+                        "incomingServer.serverName": 1,
+                        "incomingServer.port": 1,
+                        "incomingServer.security": 1,
+                        "incomingServer.email": 1,
+                        starredMails: 1,
+                    },
+                });
+
+                if (!userDoc || !userDoc.incomingServer) {
+                    return reply
+                        .status(404)
+                        .send({ message: "Incoming server not configured" });
+                }
+
+                const inc = userDoc.incomingServer;
+                if (!inc.password || typeof inc.password !== "object") {
+                    return reply.status(400).send({
+                        message: "Password not stored in reversible form. User must re-enter password.",
+                    });
+                }
+
+                const plainPass = decrypt(inc.password);
+                const serverType = (inc.serverType || "IMAP").toUpperCase();
+
+                let fetched = [];
+                if (serverType === "IMAP") {
+                    fetched = await fetchViaImap({
+                        host: inc.serverName,
+                        port: Number(inc.port),
+                        secure:
+                            (inc.security || "").toUpperCase().includes("SSL") ||
+                            Number(inc.port) === 993,
+                        user: inc.email,
+                        pass: plainPass,
+                        limit: 100,
+                    });
+                } else if (serverType === "POP3") {
+                    fetched = await fetchViaPop3({
+                        host: inc.serverName,
+                        port: Number(inc.port),
+                        tls:
+                            (inc.security || "").toUpperCase().includes("SSL") ||
+                            Number(inc.port) === 995,
+                        user: inc.email,
+                        pass: plainPass,
+                        limit: 100,
+                    });
+                } else {
+                    return reply
+                        .status(400)
+                        .send({ message: "Unsupported incoming server type" });
+                }
+
+                const starredSet = new Set(userDoc.starredMails || []);
+                const messages = fetched
+                    .filter((msg) => starredSet.has(msg.id.toString()))
+                    .map((msg) => ({
+                        ...msg,
+                        starred: true,
+                    }));
+
+                return reply.send({ provider: serverType, messages });
+            } catch (err) {
+                fastify.log.error("Starred fetch error:", err);
+                return reply.status(500).send({ error: err.message });
+            }
+        }
+    );
+
     fastify.get(
         "/mail/:uid", { preHandler: [fastify.authenticate] },
         async(req, reply) => {
             try {
-                const uid = Number(req.params.uid); // Convert to number
+                const uid = Number(req.params.uid);
                 if (isNaN(uid)) return reply.code(400).send({ error: "Invalid UID" });
 
                 const userDoc = await users().findOne({ email: req.user.email }, {
@@ -329,7 +407,7 @@ const inboxRoutes = (fastify, opts, done) => {
                             (inc.security || "").toUpperCase().includes("SSL") ||
                             Number(inc.port) === 993,
                         user: inc.email,
-                        pass: "vqxfsxjuqhsyiujr",
+                        pass: plainPass,
                         uid,
                     });
 
@@ -343,7 +421,7 @@ const inboxRoutes = (fastify, opts, done) => {
                             (inc.security || "").toUpperCase().includes("SSL") ||
                             Number(inc.port) === 995,
                         user: inc.email,
-                        pass: "vqxfsxjuqhsyiujr",
+                        pass: plainPass,
                         limit: 50,
                     });
                     mail = fetched.find((m) => Number(m.id) === uid);
