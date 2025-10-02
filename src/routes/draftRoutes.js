@@ -56,6 +56,19 @@ const draftRoutes = (fastify, opts, done) => {
         }
     );
 
+    fastify.delete(
+        "/drafts/:id", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            try {
+                await users().updateOne({ email: req.user.email }, { $pull: { drafts: { _id: new ObjectId(req.params.id) } } });
+
+                return reply.send({ success: true });
+            } catch (err) {
+                return reply.status(500).send({ error: err.message });
+            }
+        }
+    );
+
     done();
 };
 
