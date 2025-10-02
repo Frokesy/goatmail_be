@@ -177,6 +177,27 @@ Content-Transfer-Encoding: 7bit
     }
   );
 
+  fastify.get(
+    "/sent-emails",
+    { preHandler: [fastify.authenticate] },
+    async (req, reply) => {
+      console.log(req.user);
+      try {
+        const userId = req.user.userId;
+
+        const emails = await sent()
+          .find({ userId: new ObjectId(userId) })
+          .sort({ _id: -1 })
+          .toArray();
+
+        return reply.send({ emails });
+      } catch (err) {
+        console.error("Fetch Sent Emails Error:", err);
+        return reply.status(500).send({ error: err.message });
+      }
+    }
+  );
+
   // 🔹 Tracking routes
   fastify.get("/tracking/open/:id", async (req, reply) => {
     const { id } = req.params;
