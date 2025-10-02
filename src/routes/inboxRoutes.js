@@ -228,19 +228,23 @@ const inboxRoutes = (fastify, opts, done) => {
                         "incomingServer.security": 1,
                         "incomingServer.email": 1,
                         starredMails: 1,
+                        archivedMails: 1,
+                        deletedMails: 1,
                     },
                 });
 
-                if (!userDoc || !userDoc.incomingServer)
+                if (!userDoc || !userDoc.incomingServer) {
                     return reply
                         .status(404)
                         .send({ message: "Incoming server not configured" });
+                }
 
                 const inc = userDoc.incomingServer;
-                if (!inc.password || typeof inc.password !== "object")
+                if (!inc.password || typeof inc.password !== "object") {
                     return reply.status(400).send({
                         message: "Password not stored in reversible form. User must re-enter password.",
                     });
+                }
 
                 const plainPass = decrypt(inc.password);
                 const serverType = (inc.serverType || "IMAP").toUpperCase();
@@ -268,16 +272,28 @@ const inboxRoutes = (fastify, opts, done) => {
                         pass: plainPass,
                         limit: 50,
                     });
-                } else
+                } else {
                     return reply
                         .status(400)
                         .send({ message: "Unsupported incoming server type" });
+                }
 
+                // Setup sets for filtering
                 const starredSet = new Set(userDoc.starredMails || []);
-                const messages = fetched.map((msg) => ({
-                    ...msg,
-                    starred: starredSet.has(msg.id.toString()),
-                }));
+                const archivedSet = new Set(userDoc.archivedMails || []);
+                const deletedSet = new Set(userDoc.deletedMails || []);
+
+                // Normalize + filter messages
+                const messages = fetched
+                    .filter(
+                        (msg) =>
+                        !archivedSet.has(msg.id.toString()) &&
+                        !deletedSet.has(msg.id.toString())
+                    )
+                    .map((msg) => ({
+                        ...msg,
+                        starred: starredSet.has(msg.id.toString()),
+                    }));
 
                 return reply.send({ provider: serverType, messages });
             } catch (err) {
@@ -439,6 +455,40 @@ const inboxRoutes = (fastify, opts, done) => {
                 return reply.send({ mail, provider: serverType });
             } catch (err) {
                 fastify.log.error("Fetch mail error:", err);
+                return reply.status(500).send({ error: err.message });
+            }
+        }
+    );
+
+    fastify.post(
+        "/archive-mail", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            try {
+                const { mailId } = req.body;
+                const userEmail = req.user.email;
+
+                await users().updateOne({ email: userEmail }, { $addToSet: { archivedMails: mailId } });
+
+                return reply.send({ success: true });
+            } catch (err) {
+                return reply.status(500).send({ error: err.message });
+            }
+        }
+    );
+
+    fastify.post(
+        "/delete-mail", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            try {
+                const { mailId } = req.body;
+                const userEmail = req.user.email;
+
+                console.log(mailId);
+
+                await users().updateOne({ email: userEmail }, { $addToSet: { deletedMails: mailId } });
+
+                return reply.send({ success: true });
+            } catch (err) {
                 return reply.status(500).send({ error: err.message });
             }
         }
