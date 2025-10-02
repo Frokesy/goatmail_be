@@ -65,7 +65,7 @@ const sendMailRoutes = (fastify, opts, done) => {
                             );
                         }
 
-                        // 🔹 Create SMTP connection
+                        // 🔹 Create SMTP connection with debug + event logging
                         const connection = new SMTPConnection({
                             host: out.smtpServer,
                             port: Number(out.port),
@@ -73,31 +73,58 @@ const sendMailRoutes = (fastify, opts, done) => {
                                 (out.securityType || "").toUpperCase().includes("SSL") ||
                                 Number(out.port) === 465,
                             tls: { rejectUnauthorized: false },
+                            debug: true,
+                        });
+
+                        connection.on("log", (info) => {
+                            console.log("[SMTP LOG]", info);
+                        });
+                        connection.on("error", (err) => {
+                            console.error("[SMTP ERROR EVENT]", err);
+                        });
+                        connection.on("end", () => {
+                            console.log("[SMTP CONNECTION CLOSED]");
+                        });
+                        connection.on("close", () => {
+                            console.log("[SMTP SOCKET CLOSED BY SERVER]");
                         });
 
                         const connectPromise = () =>
                             new Promise((resolve, reject) => {
+                                console.log("[SMTP] Attempting connection...");
                                 connection.connect((err) => {
-                                    if (err) reject(err);
-                                    else resolve(true);
+                                    if (err) {
+                                        console.error("[SMTP] Connection failed:", err);
+                                        reject(err);
+                                    } else {
+                                        console.log("[SMTP] Connected successfully");
+                                        resolve(true);
+                                    }
                                 });
                             });
 
                         const loginPromise = () =>
                             new Promise((resolve, reject) => {
+                                console.log("[SMTP] Attempting login...");
                                 connection.login({
                                         user: out.email,
                                         pass: plainPass,
                                     },
                                     (err) => {
-                                        if (err) reject(err);
-                                        else resolve(true);
+                                        if (err) {
+                                            console.error("[SMTP] Login failed:", err);
+                                            reject(err);
+                                        } else {
+                                            console.log("[SMTP] Authenticated successfully");
+                                            resolve(true);
+                                        }
                                     }
                                 );
                             });
 
                         const sendPromise = () =>
                             new Promise((resolve, reject) => {
+                                    console.log("[SMTP] Preparing message...");
                                     const senderName = name || out.email.split("@")[0];
                                     const fromHeader = `"${senderName}" <${out.email}>`;
 
@@ -127,14 +154,20 @@ Content-Transfer-Encoding: 7bit
               { from: out.email, to: recipients },
               message,
               (err, info) => {
-                if (err) reject(err);
-                else resolve(info);
+                if (err) {
+                  console.error("[SMTP] Send failed:", err);
+                  reject(err);
+                } else {
+                  console.log("[SMTP] Message sent successfully:", info);
+                  resolve(info);
+                }
               }
             );
           });
 
         const quitPromise = () =>
           new Promise((resolve) => {
+            console.log("[SMTP] Quitting connection...");
             connection.quit();
             resolve(true);
           });
@@ -169,7 +202,7 @@ Content-Transfer-Encoding: 7bit
 
         return reply.send({ success: true, info });
       } catch (err) {
-        console.error("SMTP Error:", err);
+        console.error("SMTP Error (catch):", err);
         return reply.status(500).send({ error: err.message });
       }
     }
