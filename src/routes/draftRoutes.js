@@ -69,6 +69,19 @@ const draftRoutes = (fastify, opts, done) => {
         }
     );
 
+    fastify.get(
+        "/drafts", { preHandler: [fastify.authenticate] },
+        async(req, reply) => {
+            try {
+                const userDoc = await users().findOne({ email: req.user.email }, { projection: { drafts: 1 } });
+
+                return reply.send({ drafts: userDoc.drafts || [] });
+            } catch (err) {
+                return reply.status(500).send({ error: err.message });
+            }
+        }
+    );
+
     done();
 };
 

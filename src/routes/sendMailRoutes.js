@@ -12,7 +12,7 @@ const sendMailRoutes = (fastify, opts, done) => {
                 "/send-email", { preHandler: [fastify.authenticate] },
                 async(req, reply) => {
                     try {
-                        const { to, cc, bcc, subject, body, name, track } = req.body;
+                        const { to, cc, bcc, subject, body, name, track = false } = req.body;
 
                         if (!to || !subject || !body) {
                             return reply.status(400).send({ error: "Missing required fields" });
@@ -43,7 +43,7 @@ const sendMailRoutes = (fastify, opts, done) => {
 
                         const plainPass = decrypt(out.password);
 
-                        // 🔹 Tracking injection
+                        // 🔹 Body + Tracking (only if enabled)
                         let finalBody = body;
                         let trackingId;
                         if (track) {
@@ -65,14 +65,14 @@ const sendMailRoutes = (fastify, opts, done) => {
                             );
                         }
 
-                        // 🔹 Create SMTP connection (handles SSL & STARTTLS safely)
+                        // 🔹 Create SMTP connection
                         const connection = new SMTPConnection({
                             host: out.smtpServer,
                             port: Number(out.port),
                             secure:
                                 (out.securityType || "").toUpperCase().includes("SSL") ||
                                 Number(out.port) === 465,
-                            tls: { rejectUnauthorized: false }, // allow self-signed
+                            tls: { rejectUnauthorized: false },
                         });
 
                         const connectPromise = () =>
@@ -87,7 +87,6 @@ const sendMailRoutes = (fastify, opts, done) => {
                             new Promise((resolve, reject) => {
                                 connection.login({
                                         user: out.email,
-                                        // 🔹 keep your hardcoded password
                                         pass: plainPass,
                                     },
                                     (err) => {
@@ -108,7 +107,6 @@ const sendMailRoutes = (fastify, opts, done) => {
                                         .concat(bcc || [])
                                         .filter(Boolean);
 
-                                    // 🔹 Proper MIME message
                                     const message = `From: ${fromHeader}
 To: ${Array.isArray(to) ? to.join(", ") : to}
 ${
@@ -218,8 +216,6 @@ Content-Transfer-Encoding: 7bit
         if (!email) {
           return reply.status(404).send({ error: "Email not found" });
         }
-
-        console.log(email);
         return reply.send({ email });
       } catch (err) {
         console.error("Fetch Single Sent Email Error:", err);
