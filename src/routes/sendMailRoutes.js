@@ -198,6 +198,36 @@ Content-Transfer-Encoding: 7bit
     }
   );
 
+  fastify.get(
+    "/sent-emails/:id",
+    { preHandler: [fastify.authenticate] },
+    async (req, reply) => {
+      try {
+        const userId = req.user.userId;
+        const emailId = req.params.id;
+
+        if (!ObjectId.isValid(emailId)) {
+          return reply.status(400).send({ error: "Invalid email ID" });
+        }
+
+        const email = await sent().findOne({
+          _id: new ObjectId(emailId),
+          userId: new ObjectId(userId),
+        });
+
+        if (!email) {
+          return reply.status(404).send({ error: "Email not found" });
+        }
+
+        console.log(email);
+        return reply.send({ email });
+      } catch (err) {
+        console.error("Fetch Single Sent Email Error:", err);
+        return reply.status(500).send({ error: err.message });
+      }
+    }
+  );
+
   // 🔹 Tracking routes
   fastify.get("/tracking/open/:id", async (req, reply) => {
     const { id } = req.params;
