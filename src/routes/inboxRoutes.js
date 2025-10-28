@@ -16,7 +16,14 @@ const inboxRoutes = (fastify, opts, done) => {
       .substring(0, 200);
   }
 
-  // -------------------- IMAP: Fetch Inbox --------------------
+  function fallbackKey(parsed, envelope) {
+    const subj = (envelope?.subject || parsed?.subject || "").trim();
+    const date = (envelope?.date || parsed?.date || "").toString();
+    const from = (envelope?.from || parsed?.from?.text || "").toString();
+    return `${subj}|${date}|${from}`.substring(0, 300);
+  }
+
+  // -------------------- IMAP: Fetch Mail (Universal) --------------------
   async function fetchViaImap({
     host,
     port,
@@ -36,73 +43,228 @@ const inboxRoutes = (fastify, opts, done) => {
 
     await client.connect();
 
-    const messages = [];
-    let mailbox;
-
     try {
-      mailbox = await client.mailboxOpen(folder);
-    } catch (err) {
-      const fallbackFolders = ["Junk", "[Gmail]/Spam", "Bulk Mail"];
-      let opened = false;
+      // mapping to prefer when searching for specific logical folder
+      const folderMap = {
+        INBOX: ["INBOX"],
+        SPAM: ["Spam", "Junk", "Bulk Mail", "Junk E-mail", "[Gmail]/Spam"],
+        SENT: ["Sent", "Sent Mail", "[Gmail]/Sent Mail"],
+        DRAFTS: ["Drafts", "[Gmail]/Drafts"],
+        TRASH: ["Trash", "Deleted Items", "[Gmail]/Trash"],
+        ARCHIVE: ["Archive", "All Mail", "[Gmail]/All Mail"],
+      };
 
-      for (const alt of fallbackFolders) {
-        try {
-          mailbox = await client.mailboxOpen(alt);
-          opened = true;
-          break;
-        } catch {
-          continue;
+      // If not "ALL", try open the mapped folders (existing behavior)
+      if (folder.toUpperCase() !== "ALL") {
+        const tryFolders = folderMap[folder.toUpperCase()] || [folder];
+        let mailbox;
+        for (const f of tryFolders) {
+          try {
+            mailbox = await client.mailboxOpen(f);
+            break;
+          } catch {
+            continue;
+          }
+        }
+        if (!mailbox) {
+          await client.logout().catch(() => {});
+          throw new Error(`Unable to open folder "${folder}" or any fallbacks`);
+        }
+
+        const total = mailbox.exists;
+        const start = Math.max(1, total - (limit - 1));
+        const seq = `${start}:${total}`;
+        const messages = [];
+
+        for await (const msg of client.fetch(seq, {
+          envelope: true,
+          source: true,
+        })) {
+          let bodyText = "";
+          let excerpt = "";
+          let toField = "";
+          let parsed;
+          try {
+            parsed = msg.source ? await simpleParser(msg.source) : null;
+            bodyText = parsed?.html || parsed?.textAsHtml || parsed?.text || "";
+            excerpt = cleanExcerpt(parsed?.text || parsed?.textAsHtml || "");
+            if (parsed?.to) {
+              toField = parsed.to.value
+                .map((t) => t.name || t.address)
+                .join(", ");
+            }
+          } catch {
+            bodyText = "";
+            excerpt = "(failed to parse)";
+          }
+
+          messages.push({
+            id: msg.uid,
+            subject: msg.envelope?.subject || "(no subject)",
+            from: (msg.envelope?.from || [])
+              .map((f) => f.name || f.address || "(unknown)")
+              .join(", "),
+            to: toField,
+            date: msg.envelope?.date,
+            excerpt,
+            body: bodyText,
+            mailbox: mailbox.path, // tag with mailbox path
+            messageId: parsed?.messageId || undefined, // for dedupe
+          });
+        }
+
+        await client.logout().catch(() => {});
+        return messages.reverse();
+      }
+
+      // ---------- folder === "ALL" path ----------
+      // list all mailboxes and pick likely candidates (provider-agnostic)
+      const boxes = await client.list(); // returns array of { path, ... }
+      // Normalize list and pick candidates by name pattern
+      const lowerName = (s) => (s || "").toString().toLowerCase();
+
+      // candidate patterns we care about (order = priority)
+      const patterns = [
+        /inbox/i,
+        /sent/i,
+        /archive|all mail|archive/i,
+        /spam|junk|bulk/i,
+        /trash|deleted/i,
+        // skip drafts unless you want them:
+        // /draft/i,
+        // you may add more patterns if necessary
+      ];
+
+      // collect matching mailboxes (preserve server path)
+      const candidates = [];
+
+      for (const box of boxes) {
+        const p = box.path || box.name || "";
+        for (const pat of patterns) {
+          if (pat.test(p)) {
+            candidates.push({ path: p, priority: patterns.indexOf(pat) });
+            break;
+          }
         }
       }
 
-      if (!opened) {
-        throw new Error(
-          `Unable to open folder "${folder}" or any fallback folders`
+      // Always ensure INBOX is present and first
+      if (!candidates.some((c) => /inbox/i.test(c.path))) {
+        // try to find a mailbox that equals INBOX case-insensitive
+        const inboxBox = boxes.find(
+          (b) => lowerName(b.path || b.name) === "inbox"
+        );
+        if (inboxBox) candidates.unshift({ path: inboxBox.path, priority: 0 });
+      }
+
+      // If no candidates matched, as fallback, choose top-level boxes (limit a few)
+      if (candidates.length === 0) {
+        // fallback: take up to 6 boxes from server list
+        candidates.push(
+          ...boxes
+            .slice(0, 6)
+            .map((b, i) => ({ path: b.path, priority: 99 + i }))
         );
       }
-    }
 
-    const total = mailbox.exists;
-    const start = Math.max(1, total - (limit - 1));
-    const seq = `${start}:${total}`;
+      // We will fetch `limit` messages total, spread across candidates.
+      // Strategy: per-mailbox limit = Math.ceil(limit / candidates.length) + small buffer
+      const perMailboxLimit = Math.max(
+        10,
+        Math.ceil(limit / Math.max(1, candidates.length))
+      );
 
-    for await (let msg of client.fetch(seq, { envelope: true, source: true })) {
-      let excerpt = "";
-      let bodyText = "";
-      let toField = "";
+      // Map to hold deduped messages keyed by messageId (or fallback)
+      const seen = new Map();
+      const collected = [];
 
-      if (msg.source) {
+      // Iterate over candidates by priority
+      candidates.sort((a, b) => a.priority - b.priority);
+
+      for (const box of candidates) {
+        let mailbox;
         try {
-          const parsed = await simpleParser(msg.source);
-          excerpt = cleanExcerpt(parsed.text || "");
-          bodyText = parsed.text || "";
-          if (parsed.to) {
-            toField = parsed.to.value
-              .map((t) => t.name || t.address)
-              .join(", ");
-          }
+          mailbox = await client.mailboxOpen(box.path);
         } catch {
-          excerpt = "(failed to parse)";
-          bodyText = "";
-          toField = "";
+          continue; // skip if cannot open
         }
+
+        const total = mailbox.exists;
+        if (!total || total === 0) {
+          await client.mailboxClose().catch(() => {});
+          continue;
+        }
+
+        const start = Math.max(1, total - (perMailboxLimit - 1));
+        const seq = `${start}:${total}`;
+
+        for await (const msg of client.fetch(seq, {
+          envelope: true,
+          source: true,
+        })) {
+          let bodyText = "";
+          let excerpt = "";
+          let toField = "";
+          let parsed;
+          try {
+            parsed = msg.source ? await simpleParser(msg.source) : null;
+            bodyText = parsed?.html || parsed?.textAsHtml || parsed?.text || "";
+            excerpt = cleanExcerpt(parsed?.text || parsed?.textAsHtml || "");
+            if (parsed?.to) {
+              toField = parsed.to.value
+                .map((t) => t.name || t.address)
+                .join(", ");
+            }
+          } catch {
+            bodyText = "";
+            excerpt = "(failed to parse)";
+          }
+
+          const messageId = parsed?.messageId;
+          const key = messageId || fallbackKey(parsed, msg.envelope);
+
+          // If we already have the same message, add mailbox to its tags array instead of duplicating
+          if (seen.has(key)) {
+            const existing = seen.get(key);
+            // push mailbox name if not present
+            if (!existing.mailboxes.includes(mailbox.path)) {
+              existing.mailboxes.push(mailbox.path);
+            }
+            continue;
+          }
+
+          const entry = {
+            id: msg.uid,
+            subject: msg.envelope?.subject || "(no subject)",
+            from: (msg.envelope?.from || [])
+              .map((f) => f.name || f.address || "(unknown)")
+              .join(", "),
+            to: toField,
+            date: msg.envelope?.date,
+            excerpt,
+            body: bodyText,
+            mailboxes: [mailbox.path],
+            mailbox: mailbox.path,
+            messageId,
+          };
+
+          seen.set(key, entry);
+          collected.push(entry);
+
+          if (collected.length >= limit) break;
+        }
+
+        await client.mailboxClose().catch(() => {});
+        if (collected.length >= limit) break;
       }
 
-      messages.push({
-        id: msg.uid,
-        subject: msg.envelope.subject || "(no subject)",
-        from: (msg.envelope.from || [])
-          .map((f) => f.name || f.address || "(unknown)")
-          .join(", "),
-        to: toField,
-        date: msg.envelope.date,
-        excerpt,
-        body: bodyText,
-      });
-    }
+      await client.logout().catch(() => {});
 
-    await client.logout().catch(() => {});
-    return messages.reverse();
+      collected.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      return collected.slice(0, limit);
+    } finally {
+    }
   }
 
   // -------------------- IMAP: Fetch Single Mail --------------------
@@ -404,12 +566,10 @@ const inboxRoutes = (fastify, opts, done) => {
             .send({ message: "Unsupported incoming server type" });
         }
 
-        // Setup sets for filtering
         const starredSet = new Set(userDoc.starredMails || []);
         const archivedSet = new Set(userDoc.archivedMails || []);
         const deletedSet = new Set(userDoc.deletedMails || []);
 
-        // Normalize + filter messages
         const messages = fetched
           .filter(
             (msg) =>
@@ -424,6 +584,77 @@ const inboxRoutes = (fastify, opts, done) => {
         return reply.send({ provider: serverType, messages });
       } catch (err) {
         fastify.log.error("Inbox error:", err);
+        return reply.status(500).send({ error: err.message });
+      }
+    }
+  );
+
+  // -------------------- All Mail Route --------------------
+  fastify.get(
+    "/all-mail",
+    { preHandler: [fastify.authenticate] },
+    async (req, reply) => {
+      try {
+        const userDoc = await users().findOne(
+          { email: req.user.email },
+          {
+            projection: {
+              "incomingServer.password": 1,
+              "incomingServer.serverType": 1,
+              "incomingServer.serverName": 1,
+              "incomingServer.port": 1,
+              "incomingServer.security": 1,
+              "incomingServer.email": 1,
+            },
+          }
+        );
+
+        if (!userDoc || !userDoc.incomingServer) {
+          return reply
+            .status(404)
+            .send({ message: "Incoming server not configured" });
+        }
+
+        const inc = userDoc.incomingServer;
+
+        if (!inc.password || typeof inc.password !== "object") {
+          return reply.status(400).send({
+            message:
+              "Password not stored in reversible form. User must re-enter password.",
+          });
+        }
+
+        const plainPass = decrypt(inc.password);
+        const serverType = (inc.serverType || "IMAP").toUpperCase();
+
+        if (serverType !== "IMAP") {
+          return reply.status(400).send({
+            message: "All Mail fetching is only supported for IMAP accounts.",
+          });
+        }
+
+        const fetched = await fetchViaImap({
+          host: inc.serverName,
+          port: Number(inc.port),
+          secure:
+            (inc.security || "").toUpperCase().includes("SSL") ||
+            Number(inc.port) === 993,
+          user: inc.email,
+          pass: plainPass,
+          folder: "ALL",
+          limit: 50,
+        });
+
+        const mailboxUsed = fetched.length > 0 ? fetched[0].folder : "ALL";
+
+        return reply.send({
+          provider: serverType,
+          folder: mailboxUsed,
+          count: fetched.length,
+          messages: fetched,
+        });
+      } catch (err) {
+        fastify.log.error("All Mail fetch error:", err);
         return reply.status(500).send({ error: err.message });
       }
     }
