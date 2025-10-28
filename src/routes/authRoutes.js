@@ -5,7 +5,7 @@ import Stripe from "stripe";
 
 const require = createRequire(
     import.meta.url);
-const { sendOtpEmail } = require("../utils/email/sendOtp.js");
+import { sendOtpEmail } from "../utils/email/sendOtp.js";
 import bcrypt from "bcrypt";
 import speakeasy from "speakeasy";
 import QRCode from "qrcode";
