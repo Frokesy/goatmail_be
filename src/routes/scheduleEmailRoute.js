@@ -169,8 +169,6 @@ Content-Transfer-Encoding: 7bit
           { _id: email._id },
           { $set: { status: "sent", sentAt: new Date() } }
         );
-
-        console.log(`✅ Sent scheduled email: ${email.subject}`);
       } catch (err) {
         console.error("Failed to send scheduled email:", err);
         await scheduled().updateOne(
@@ -180,6 +178,54 @@ Content-Transfer-Encoding: 7bit
       }
     }
   });
+
+  fastify.get(
+    "/scheduled-emails",
+    { preHandler: [fastify.authenticate] },
+    async (req, reply) => {
+      try {
+        const userId = req.user.userId;
+
+        const emails = await scheduled()
+          .find({ userId: new ObjectId(userId) })
+          .sort({ _id: -1 })
+          .toArray();
+
+        return reply.send({ emails });
+      } catch (err) {
+        console.error("Fetch Scheduled Emails Error:", err);
+        return reply.status(500).send({ error: err.message });
+      }
+    }
+  );
+
+  fastify.get(
+    "/scheduled-emails/:id",
+    { preHandler: [fastify.authenticate] },
+    async (req, reply) => {
+      try {
+        const userId = req.user.userId;
+        const emailId = req.params.id;
+
+        if (!ObjectId.isValid(emailId)) {
+          return reply.status(400).send({ error: "Invalid email ID" });
+        }
+
+        const email = await sent().findOne({
+          _id: new ObjectId(emailId),
+          userId: new ObjectId(userId),
+        });
+
+        if (!email) {
+          return reply.status(404).send({ error: "Email not found" });
+        }
+        return reply.send({ email });
+      } catch (err) {
+        console.error("Fetch Single Scheduled Email Error:", err);
+        return reply.status(500).send({ error: err.message });
+      }
+    }
+  );
 
   done();
 };

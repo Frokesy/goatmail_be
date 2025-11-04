@@ -213,7 +213,6 @@ Content-Transfer-Encoding: 7bit
     "/sent-emails",
     { preHandler: [fastify.authenticate] },
     async (req, reply) => {
-      console.log(req.user);
       try {
         const userId = req.user.userId;
 
@@ -258,7 +257,6 @@ Content-Transfer-Encoding: 7bit
     }
   );
 
-  // 🔹 Tracking routes
   fastify.get("/tracking/open/:id", async (req, reply) => {
     const { id } = req.params;
 
@@ -285,7 +283,6 @@ Content-Transfer-Encoding: 7bit
       .header("Expires", "0")
       .header("Surrogate-Control", "no-store");
 
-    // return 1x1 transparent gif
     const pixel = Buffer.from(
       "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
       "base64"
