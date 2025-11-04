@@ -13,7 +13,16 @@ const scheduleEmailRoutes = (fastify, opts, done) => {
     { preHandler: [fastify.authenticate] },
     async (req, reply) => {
       try {
-        const { to, cc, bcc, subject, body, name, scheduledAt } = req.body;
+        const {
+          to,
+          cc,
+          bcc,
+          subject,
+          body,
+          name,
+          scheduledAt,
+          track = false,
+        } = req.body;
 
         if (!to || !subject || !body || !scheduledAt)
           return reply.status(400).send({ error: "Missing required fields" });
@@ -34,6 +43,7 @@ const scheduleEmailRoutes = (fastify, opts, done) => {
           subject,
           body,
           name,
+          track,
           scheduledAt: scheduleDate,
           status: "pending",
           createdAt: new Date(),
@@ -65,6 +75,27 @@ const scheduleEmailRoutes = (fastify, opts, done) => {
         const out = userDoc.outgoingEmail;
         const plainPass = decrypt(out.password);
 
+        let finalBody = email.body;
+        let trackingId;
+        if (email.track) {
+          trackingId = new ObjectId().toString();
+          const pixelUrl = `${process.env.API_URL}/tracking/open/${trackingId}`;
+          const trackingPixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none" />`;
+
+          finalBody += `\n\n${trackingPixel}`;
+
+          // Wrap links for click tracking
+          finalBody = finalBody.replace(
+            /(https?:\/\/[^\s]+)/g,
+            (url) =>
+              `${
+                process.env.API_URL
+              }/tracking/click/${trackingId}?redirect=${encodeURIComponent(
+                url
+              )}`
+          );
+        }
+
         const connection = new SMTPConnection({
           host: out.smtpServer,
           port: Number(out.port),
@@ -83,24 +114,32 @@ const scheduleEmailRoutes = (fastify, opts, done) => {
           )
         );
 
+        const senderName = email.name || out.email.split("@")[0];
+        const fromHeader = `"${senderName}" <${out.email}>`;
+
         const recipients = []
           .concat(email.to || [])
           .concat(email.cc || [])
           .concat(email.bcc || [])
           .filter(Boolean);
 
-        const message = `From: "${email.name || out.email}" <${out.email}>
+        const message = `From: ${fromHeader}
 To: ${Array.isArray(email.to) ? email.to.join(", ") : email.to}
 ${
   email.cc
     ? `Cc: ${Array.isArray(email.cc) ? email.cc.join(", ") : email.cc}\n`
     : ""
-}
-Subject: ${email.subject}
+}Subject: ${email.subject}
 MIME-Version: 1.0
 Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: 7bit
 
-<html><body>${email.body}</body></html>`;
+<html>
+  <body>
+    ${finalBody}
+  </body>
+</html>
+`;
 
         const info = await new Promise((res, rej) =>
           connection.send(
@@ -112,11 +151,19 @@ Content-Type: text/html; charset=UTF-8
 
         connection.quit();
 
-        await sent().insertOne({
+        const emailDoc = {
           ...email,
           sentAt: new Date(),
           smtpInfo: info,
-        });
+        };
+
+        if (email.track) {
+          emailDoc.trackingId = trackingId;
+          emailDoc.opened = false;
+          emailDoc.clicks = [];
+        }
+
+        await sent().insertOne(emailDoc);
 
         await scheduled().updateOne(
           { _id: email._id },

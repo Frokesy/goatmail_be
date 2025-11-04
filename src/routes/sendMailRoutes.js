@@ -48,7 +48,6 @@ const sendMailRoutes = (fastify, opts, done) => {
 
         const plainPass = decrypt(out.password);
 
-        // 🔹 Body + Tracking (only if enabled)
         let finalBody = body;
         let trackingId;
         if (track) {
@@ -58,7 +57,6 @@ const sendMailRoutes = (fastify, opts, done) => {
 
           finalBody += `\n\n${trackingPixel}`;
 
-          // Wrap links for click tracking
           finalBody = finalBody.replace(
             /(https?:\/\/[^\s]+)/g,
             (url) =>
@@ -70,7 +68,6 @@ const sendMailRoutes = (fastify, opts, done) => {
           );
         }
 
-        // 🔹 Create SMTP connection with debug + event logging
         const connection = new SMTPConnection({
           host: out.smtpServer,
           port: Number(out.port),
