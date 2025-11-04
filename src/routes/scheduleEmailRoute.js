@@ -153,6 +153,7 @@ Content-Transfer-Encoding: 7bit
 
         const emailDoc = {
           ...email,
+          status: "sent",
           sentAt: new Date(),
           smtpInfo: info,
         };
@@ -211,7 +212,7 @@ Content-Transfer-Encoding: 7bit
           return reply.status(400).send({ error: "Invalid email ID" });
         }
 
-        const email = await sent().findOne({
+        const email = await scheduled().findOne({
           _id: new ObjectId(emailId),
           userId: new ObjectId(userId),
         });
