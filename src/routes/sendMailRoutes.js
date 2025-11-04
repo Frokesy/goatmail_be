@@ -5,136 +5,142 @@ import { decrypt } from "../utils/cryptoUtils.js";
 import { ObjectId } from "mongodb";
 
 const sendMailRoutes = (fastify, opts, done) => {
-        const users = () => fastify.mongo.db.collection("users");
-        const sent = () => fastify.mongo.db.collection("sentEmails");
+  const users = () => fastify.mongo.db.collection("users");
+  const sent = () => fastify.mongo.db.collection("sentEmails");
 
-        fastify.post(
-                "/send-email", { preHandler: [fastify.authenticate] },
-                async(req, reply) => {
-                    try {
-                        const { to, cc, bcc, subject, body, name, track = false } = req.body;
+  fastify.post(
+    "/send-email",
+    { preHandler: [fastify.authenticate] },
+    async (req, reply) => {
+      try {
+        const { to, cc, bcc, subject, body, name, track = false } = req.body;
 
-                        if (!to || !subject || !body) {
-                            return reply.status(400).send({ error: "Missing required fields" });
-                        }
+        if (!to || !subject || !body) {
+          return reply.status(400).send({ error: "Missing required fields" });
+        }
 
-                        const userDoc = await users().findOne({ email: req.user.email }, {
-                            projection: {
-                                "outgoingEmail.password": 1,
-                                "outgoingEmail.smtpServer": 1,
-                                "outgoingEmail.securityType": 1,
-                                "outgoingEmail.port": 1,
-                                "outgoingEmail.email": 1,
-                            },
-                        });
+        const userDoc = await users().findOne(
+          { email: req.user.email },
+          {
+            projection: {
+              "outgoingEmail.password": 1,
+              "outgoingEmail.smtpServer": 1,
+              "outgoingEmail.securityType": 1,
+              "outgoingEmail.port": 1,
+              "outgoingEmail.email": 1,
+            },
+          }
+        );
 
-                        if (!userDoc || !userDoc.outgoingEmail) {
-                            return reply
-                                .status(404)
-                                .send({ message: "SMTP details not configured" });
-                        }
+        if (!userDoc || !userDoc.outgoingEmail) {
+          return reply
+            .status(404)
+            .send({ message: "SMTP details not configured" });
+        }
 
-                        const out = userDoc.outgoingEmail;
-                        if (!out.password || typeof out.password !== "object") {
-                            return reply.status(400).send({
-                                message: "Password not stored in reversible form. User must re-enter password.",
-                            });
-                        }
+        const out = userDoc.outgoingEmail;
+        if (!out.password || typeof out.password !== "object") {
+          return reply.status(400).send({
+            message:
+              "Password not stored in reversible form. User must re-enter password.",
+          });
+        }
 
-                        const plainPass = decrypt(out.password);
+        const plainPass = decrypt(out.password);
 
-                        // 🔹 Body + Tracking (only if enabled)
-                        let finalBody = body;
-                        let trackingId;
-                        if (track) {
-                            trackingId = new ObjectId().toString();
-                            const pixelUrl = `${process.env.API_URL}/tracking/open/${trackingId}`;
-                            const trackingPixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none" />`;
+        // 🔹 Body + Tracking (only if enabled)
+        let finalBody = body;
+        let trackingId;
+        if (track) {
+          trackingId = new ObjectId().toString();
+          const pixelUrl = `${process.env.API_URL}/tracking/open/${trackingId}`;
+          const trackingPixel = `<img src="${pixelUrl}" width="1" height="1" style="display:none" />`;
 
-                            finalBody += `\n\n${trackingPixel}`;
+          finalBody += `\n\n${trackingPixel}`;
 
-                            // Wrap links for click tracking
-                            finalBody = finalBody.replace(
-                                /(https?:\/\/[^\s]+)/g,
-                                (url) =>
-                                `${
+          // Wrap links for click tracking
+          finalBody = finalBody.replace(
+            /(https?:\/\/[^\s]+)/g,
+            (url) =>
+              `${
                 process.env.API_URL
               }/tracking/click/${trackingId}?redirect=${encodeURIComponent(
                 url
               )}`
-                            );
-                        }
+          );
+        }
 
-                        // 🔹 Create SMTP connection with debug + event logging
-                        const connection = new SMTPConnection({
-                            host: out.smtpServer,
-                            port: Number(out.port),
-                            secure:
-                                (out.securityType || "").toUpperCase().includes("SSL") ||
-                                Number(out.port) === 465,
-                            tls: { rejectUnauthorized: false },
-                            debug: true,
-                        });
+        // 🔹 Create SMTP connection with debug + event logging
+        const connection = new SMTPConnection({
+          host: out.smtpServer,
+          port: Number(out.port),
+          secure:
+            (out.securityType || "").toUpperCase().includes("SSL") ||
+            Number(out.port) === 465,
+          tls: { rejectUnauthorized: false },
+          debug: true,
+        });
 
-                        connection.on("log", (info) => {
-                            console.log("[SMTP LOG]", info);
-                        });
-                        connection.on("error", (err) => {
-                            console.error("[SMTP ERROR EVENT]", err);
-                        });
-                        connection.on("end", () => {
-                            console.log("[SMTP CONNECTION CLOSED]");
-                        });
-                        connection.on("close", () => {
-                            console.log("[SMTP SOCKET CLOSED BY SERVER]");
-                        });
+        connection.on("log", (info) => {
+          console.log("[SMTP LOG]", info);
+        });
+        connection.on("error", (err) => {
+          console.error("[SMTP ERROR EVENT]", err);
+        });
+        connection.on("end", () => {
+          console.log("[SMTP CONNECTION CLOSED]");
+        });
+        connection.on("close", () => {
+          console.log("[SMTP SOCKET CLOSED BY SERVER]");
+        });
 
-                        const connectPromise = () =>
-                            new Promise((resolve, reject) => {
-                                console.log("[SMTP] Attempting connection...");
-                                connection.connect((err) => {
-                                    if (err) {
-                                        console.error("[SMTP] Connection failed:", err);
-                                        reject(err);
-                                    } else {
-                                        console.log("[SMTP] Connected successfully");
-                                        resolve(true);
-                                    }
-                                });
-                            });
+        const connectPromise = () =>
+          new Promise((resolve, reject) => {
+            console.log("[SMTP] Attempting connection...");
+            connection.connect((err) => {
+              if (err) {
+                console.error("[SMTP] Connection failed:", err);
+                reject(err);
+              } else {
+                console.log("[SMTP] Connected successfully");
+                resolve(true);
+              }
+            });
+          });
 
-                        const loginPromise = () =>
-                            new Promise((resolve, reject) => {
-                                console.log("[SMTP] Attempting login...");
-                                connection.login({
-                                        user: out.email,
-                                        pass: plainPass,
-                                    },
-                                    (err) => {
-                                        if (err) {
-                                            console.error("[SMTP] Login failed:", err);
-                                            reject(err);
-                                        } else {
-                                            console.log("[SMTP] Authenticated successfully");
-                                            resolve(true);
-                                        }
-                                    }
-                                );
-                            });
+        const loginPromise = () =>
+          new Promise((resolve, reject) => {
+            console.log("[SMTP] Attempting login...");
+            connection.login(
+              {
+                user: out.email,
+                pass: plainPass,
+              },
+              (err) => {
+                if (err) {
+                  console.error("[SMTP] Login failed:", err);
+                  reject(err);
+                } else {
+                  console.log("[SMTP] Authenticated successfully");
+                  resolve(true);
+                }
+              }
+            );
+          });
 
-                        const sendPromise = () =>
-                            new Promise((resolve, reject) => {
-                                    console.log("[SMTP] Preparing message...");
-                                    const senderName = name || out.email.split("@")[0];
-                                    const fromHeader = `"${senderName}" <${out.email}>`;
+        const sendPromise = () =>
+          new Promise((resolve, reject) => {
+            console.log("[SMTP] Preparing message...");
+            const senderName = name || out.email.split("@")[0];
+            const fromHeader = `"${senderName}" <${out.email}>`;
 
-                                    const recipients = []
-                                        .concat(to || [])
-                                        .concat(cc || [])
-                                        .concat(bcc || [])
-                                        .filter(Boolean);
+            const recipients = []
+              .concat(to || [])
+              .concat(cc || [])
+              .concat(bcc || [])
+              .filter(Boolean);
 
-                                    const message = `From: ${fromHeader}
+            const message = `From: ${fromHeader}
 To: ${Array.isArray(to) ? to.join(", ") : to}
 ${
   cc ? `Cc: ${Array.isArray(cc) ? cc.join(", ") : cc}\n` : ""
@@ -172,13 +178,11 @@ Content-Transfer-Encoding: 7bit
             resolve(true);
           });
 
-        // 🔹 Flow
         await connectPromise();
         await loginPromise();
         const info = await sendPromise();
         await quitPromise();
 
-        // 🔹 Save to DB
         const emailDoc = {
           userId: userDoc._id,
           from: out.email,
