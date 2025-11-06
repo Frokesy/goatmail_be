@@ -20,7 +20,9 @@ const sendMailRoutes = (fastify, opts, done) => {
 
   fastify.post("/upload-attachment", async (req, reply) => {
     const data = await req.file();
-    const fileName = Date.now() + "-" + data.filename;
+    const cleanFileName = decodeURIComponent(data.filename);
+    const safeFileName = cleanFileName.replace(/[^\w.\- ()]/g, "");
+    const fileName = Date.now() + "-" + safeFileName;
     const uploadDir = path.join(__dirname, "uploads");
 
     if (!fs.existsSync(uploadDir)) {
@@ -54,7 +56,7 @@ const sendMailRoutes = (fastify, opts, done) => {
           name,
           track = false,
           attachments = [],
-        } = req.body; // ✅ parse JSON directly
+        } = req.body;
 
         if (!to || !subject || !body) {
           return reply.status(400).send({ error: "Missing required fields" });
@@ -82,7 +84,6 @@ const sendMailRoutes = (fastify, opts, done) => {
         const out = userDoc.outgoingEmail;
         const plainPass = decrypt(out.password);
 
-        // === Tracking logic remains unchanged ===
         let finalBody = body;
         let trackingId;
         if (track) {
@@ -103,7 +104,6 @@ const sendMailRoutes = (fastify, opts, done) => {
           );
         }
 
-        // === SMTP connection setup (same as before) ===
         const connection = new SMTPConnection({
           host: out.smtpServer,
           port: Number(out.port),
@@ -124,7 +124,6 @@ const sendMailRoutes = (fastify, opts, done) => {
             );
           });
 
-        // === Build MIME message ===
         const boundary = `----=_Part_${Date.now()}`;
         const senderName = name || out.email.split("@")[0];
         const fromHeader = `"${senderName}" <${out.email}>`;
@@ -153,13 +152,12 @@ const sendMailRoutes = (fastify, opts, done) => {
           .join("\r\n");
 
         for (const att of attachments) {
-          const filePath = path.join(
-            __dirname,
-            "uploads",
-            path.basename(att.url)
-          );
+          const decodedFileName = decodeURIComponent(path.basename(att.url));
+          const filePath = path.join(__dirname, "uploads", decodedFileName);
+
           if (fs.existsSync(filePath)) {
             const fileContent = fs.readFileSync(filePath).toString("base64");
+
             message += [
               ``,
               `--${boundary}`,
