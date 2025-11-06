@@ -10,12 +10,27 @@ import incomingServerRoutes from "./routes/incomingServerRoutes.js";
 import sendMailRoutes from "./routes/sendMailRoutes.js";
 import draftRoutes from "./routes/draftRoutes.js";
 import scheduleEmailRoutes from "./routes/scheduleEmailRoute.js";
+import fastifyMultipart from "@fastify/multipart";
+import fastifyStatic from "@fastify/static";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const fastify = Fastify({ logger: true });
 
 fastify.register(fastifyMongodb, {
   forceClose: true,
   url: process.env.MONGO_URI,
+});
+
+fastify.register(fastifyMultipart, {
+  limits: { fileSize: 25 * 1024 * 1024 },
+});
+
+fastify.register(fastifyStatic, {
+  root: join(__dirname, "routes/uploads"),
+  prefix: "/uploads/",
 });
 
 fastify.register(authPlugin);

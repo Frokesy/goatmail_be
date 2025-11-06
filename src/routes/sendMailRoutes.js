@@ -3,17 +3,58 @@ dotenv.config();
 import SMTPConnection from "smtp-connection";
 import { decrypt } from "../utils/cryptoUtils.js";
 import { ObjectId } from "mongodb";
+import fs from "fs";
+import path from "path";
+import { pipeline } from "stream";
+import { promisify } from "util";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const pump = promisify(pipeline);
 
 const sendMailRoutes = (fastify, opts, done) => {
   const users = () => fastify.mongo.db.collection("users");
   const sent = () => fastify.mongo.db.collection("sentEmails");
 
+  fastify.post("/upload-attachment", async (req, reply) => {
+    const data = await req.file();
+    const fileName = Date.now() + "-" + data.filename;
+    const uploadDir = path.join(__dirname, "uploads");
+
+    if (!fs.existsSync(uploadDir)) {
+      fs.mkdirSync(uploadDir, { recursive: true });
+    }
+
+    const filePath = path.join(uploadDir, fileName);
+    await pump(data.file, fs.createWriteStream(filePath));
+
+    return {
+      success: true,
+      file: {
+        name: data.filename,
+        url: `/uploads/${fileName}`,
+        size: data.file.bytesRead,
+        mimeType: data.mimetype,
+      },
+    };
+  });
   fastify.post(
     "/send-email",
     { preHandler: [fastify.authenticate] },
     async (req, reply) => {
       try {
-        const { to, cc, bcc, subject, body, name, track = false } = req.body;
+        const {
+          to,
+          cc,
+          bcc,
+          subject,
+          body,
+          name,
+          track = false,
+          attachments = [],
+        } = req.body; // ✅ parse JSON directly
 
         if (!to || !subject || !body) {
           return reply.status(400).send({ error: "Missing required fields" });
@@ -39,15 +80,9 @@ const sendMailRoutes = (fastify, opts, done) => {
         }
 
         const out = userDoc.outgoingEmail;
-        if (!out.password || typeof out.password !== "object") {
-          return reply.status(400).send({
-            message:
-              "Password not stored in reversible form. User must re-enter password.",
-          });
-        }
-
         const plainPass = decrypt(out.password);
 
+        // === Tracking logic remains unchanged ===
         let finalBody = body;
         let trackingId;
         if (track) {
@@ -68,6 +103,7 @@ const sendMailRoutes = (fastify, opts, done) => {
           );
         }
 
+        // === SMTP connection setup (same as before) ===
         const connection = new SMTPConnection({
           host: out.smtpServer,
           port: Number(out.port),
@@ -75,112 +111,85 @@ const sendMailRoutes = (fastify, opts, done) => {
             (out.securityType || "").toUpperCase().includes("SSL") ||
             Number(out.port) === 465,
           tls: { rejectUnauthorized: false },
-          debug: true,
-        });
-
-        connection.on("log", (info) => {
-          console.log("[SMTP LOG]", info);
-        });
-        connection.on("error", (err) => {
-          console.error("[SMTP ERROR EVENT]", err);
-        });
-        connection.on("end", () => {
-          console.log("[SMTP CONNECTION CLOSED]");
-        });
-        connection.on("close", () => {
-          console.log("[SMTP SOCKET CLOSED BY SERVER]");
         });
 
         const connectPromise = () =>
           new Promise((resolve, reject) => {
-            console.log("[SMTP] Attempting connection...");
-            connection.connect((err) => {
-              if (err) {
-                console.error("[SMTP] Connection failed:", err);
-                reject(err);
-              } else {
-                console.log("[SMTP] Connected successfully");
-                resolve(true);
-              }
-            });
+            connection.connect((err) => (err ? reject(err) : resolve(true)));
           });
-
         const loginPromise = () =>
           new Promise((resolve, reject) => {
-            console.log("[SMTP] Attempting login...");
-            connection.login(
-              {
-                user: out.email,
-                pass: plainPass,
-              },
-              (err) => {
-                if (err) {
-                  console.error("[SMTP] Login failed:", err);
-                  reject(err);
-                } else {
-                  console.log("[SMTP] Authenticated successfully");
-                  resolve(true);
-                }
-              }
+            connection.login({ user: out.email, pass: plainPass }, (err) =>
+              err ? reject(err) : resolve(true)
             );
           });
+
+        // === Build MIME message ===
+        const boundary = `----=_Part_${Date.now()}`;
+        const senderName = name || out.email.split("@")[0];
+        const fromHeader = `"${senderName}" <${out.email}>`;
+
+        const recipients = []
+          .concat(to || [])
+          .concat(cc || [])
+          .concat(bcc || [])
+          .filter(Boolean);
+
+        let message = [
+          `From: ${fromHeader}`,
+          `To: ${Array.isArray(to) ? to.join(", ") : to}`,
+          cc ? `Cc: ${Array.isArray(cc) ? cc.join(", ") : cc}` : null,
+          `Subject: ${subject}`,
+          `MIME-Version: 1.0`,
+          `Content-Type: multipart/mixed; boundary="${boundary}"`,
+          ``,
+          `--${boundary}`,
+          `Content-Type: text/html; charset="UTF-8"`,
+          `Content-Transfer-Encoding: quoted-printable`,
+          ``,
+          `${finalBody}`,
+        ]
+          .filter(Boolean)
+          .join("\r\n");
+
+        for (const att of attachments) {
+          const filePath = path.join(
+            __dirname,
+            "uploads",
+            path.basename(att.url)
+          );
+          if (fs.existsSync(filePath)) {
+            const fileContent = fs.readFileSync(filePath).toString("base64");
+            message += [
+              ``,
+              `--${boundary}`,
+              `Content-Type: ${
+                att.mimeType || "application/octet-stream"
+              }; name="${att.name}"`,
+              `Content-Disposition: attachment; filename="${att.name}"`,
+              `Content-Transfer-Encoding: base64`,
+              ``,
+              fileContent,
+            ].join("\r\n");
+          }
+        }
+        message += `\r\n--${boundary}--\r\n`;
 
         const sendPromise = () =>
           new Promise((resolve, reject) => {
-            console.log("[SMTP] Preparing message...");
-            const senderName = name || out.email.split("@")[0];
-            const fromHeader = `"${senderName}" <${out.email}>`;
-
-            const recipients = []
-              .concat(to || [])
-              .concat(cc || [])
-              .concat(bcc || [])
-              .filter(Boolean);
-
-            const message = `From: ${fromHeader}
-To: ${Array.isArray(to) ? to.join(", ") : to}
-${
-  cc ? `Cc: ${Array.isArray(cc) ? cc.join(", ") : cc}\n` : ""
-}Subject: ${subject}
-MIME-Version: 1.0
-Content-Type: text/html; charset=UTF-8
-Content-Transfer-Encoding: 7bit
-
-<html>
-  <body>
-    ${finalBody}
-  </body>
-</html>
-`;
-
             connection.send(
               { from: out.email, to: recipients },
               message,
-              (err, info) => {
-                if (err) {
-                  console.error("[SMTP] Send failed:", err);
-                  reject(err);
-                } else {
-                  console.log("[SMTP] Message sent successfully:", info);
-                  resolve(info);
-                }
-              }
+              (err, info) => (err ? reject(err) : resolve(info))
             );
-          });
-
-        const quitPromise = () =>
-          new Promise((resolve) => {
-            console.log("[SMTP] Quitting connection...");
-            connection.quit();
-            resolve(true);
           });
 
         await connectPromise();
         await loginPromise();
         const info = await sendPromise();
-        await quitPromise();
+        connection.quit();
 
-        const emailDoc = {
+        await sent().insertOne({
           userId: userDoc._id,
           from: out.email,
           senderName: name,
@@ -191,19 +200,13 @@ Content-Transfer-Encoding: 7bit
           body,
           sentAt: new Date(),
           smtpInfo: info,
-        };
-
-        if (track) {
-          emailDoc.trackingId = trackingId;
-          emailDoc.opened = false;
-          emailDoc.clicks = [];
-        }
-
-        await sent().insertOne(emailDoc);
+          attachments,
+          ...(track && { trackingId, opened: false, clicks: [] }),
+        });
 
         return reply.send({ success: true, info });
       } catch (err) {
-        console.error("SMTP Error (catch):", err);
+        console.error("Send Email Error:", err);
         return reply.status(500).send({ error: err.message });
       }
     }
