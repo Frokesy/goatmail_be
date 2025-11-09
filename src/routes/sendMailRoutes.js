@@ -9,6 +9,7 @@ import { pipeline } from "stream";
 import { promisify } from "util";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { encryptFile, encryptText } from "../utils/emailEncryption.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -56,11 +57,15 @@ const sendMailRoutes = (fastify, opts, done) => {
           name,
           track = false,
           attachments = [],
+          encrypt = false,
+          password,
+          expiresAt,
         } = req.body;
 
         if (!to || !subject || !body) {
           return reply.status(400).send({ error: "Missing required fields" });
         }
+        const secureId = new ObjectId().toString();
 
         const userDoc = await users().findOne(
           { email: req.user.email },
@@ -85,6 +90,42 @@ const sendMailRoutes = (fastify, opts, done) => {
         const plainPass = decrypt(out.password);
 
         let finalBody = body;
+        let encryptedData;
+        let encryptedAttachments = [];
+
+        if (encrypt && password) {
+          const encrypted = encryptText(body, password);
+          encryptedData = encrypted;
+
+          for (const att of attachments) {
+            const decodedFileName = decodeURIComponent(path.basename(att.url));
+            const filePath = path.join(__dirname, "uploads", decodedFileName);
+
+            if (fs.existsSync(filePath)) {
+              const encryptedFile = encryptFile(filePath, password);
+
+              encryptedAttachments.push({
+                name: att.name,
+                mimeType: att.mimeType,
+                iv: encryptedFile.iv,
+                encPath: encryptedFile.path,
+                originalName: att.name,
+              });
+            }
+          }
+
+          const secureLink = `${process.env.APP_URL}/secure/${secureId}`;
+          finalBody = `
+    <p>This email is protected.</p>
+    <p>Click below to view it securely:</p>
+    <a href="${secureLink}">${secureLink}</a>
+    <br><br>
+    <small>You'll need the password to open it.</small>
+  `;
+
+          attachments.length = 0;
+        }
+
         let trackingId;
         if (track) {
           trackingId = new ObjectId().toString();
@@ -188,6 +229,7 @@ const sendMailRoutes = (fastify, opts, done) => {
         connection.quit();
 
         await sent().insertOne({
+          _id: secureId ? new ObjectId(secureId) : new ObjectId(),
           userId: userDoc._id,
           from: out.email,
           senderName: name,
@@ -195,10 +237,16 @@ const sendMailRoutes = (fastify, opts, done) => {
           cc,
           bcc,
           subject,
-          body,
+          ...(encrypt
+            ? {
+                encrypted: true,
+                encryptedData,
+                attachments: encryptedAttachments,
+                expiresAt: expiresAt ? new Date(expiresAt) : null,
+              }
+            : { body, attachments }),
           sentAt: new Date(),
           smtpInfo: info,
-          attachments,
           ...(track && { trackingId, opened: false, clicks: [] }),
         });
 
