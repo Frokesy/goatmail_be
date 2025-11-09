@@ -14,6 +14,7 @@ import fastifyMultipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import aiRoutes from "./routes/ai.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -41,6 +42,7 @@ fastify.register(incomingServerRoutes, { prefix: "/api" });
 fastify.register(sendMailRoutes, { prefix: "/api" });
 fastify.register(scheduleEmailRoutes, { prefix: "/api" });
 fastify.register(draftRoutes, { prefix: "/api" });
+fastify.register(aiRoutes, { prefix: "/api" });
 
 fastify.listen({ port: 3000, host: "0.0.0.0" }, (err, address) => {
   if (err) {

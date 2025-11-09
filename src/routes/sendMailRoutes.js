@@ -138,8 +138,9 @@ const sendMailRoutes = (fastify, opts, done) => {
 
           finalBody += `\n\n${trackingPixel}`;
 
+          const regex = /(https?:\/\/[^\s]+)/g;
           finalBody = finalBody.replace(
-            /(https?:\/\/[^\s]+)/g,
+            regex,
             (url) =>
               `${
                 process.env.API_URL
@@ -148,7 +149,6 @@ const sendMailRoutes = (fastify, opts, done) => {
               )}`
           );
         }
-
         const connection = new SMTPConnection({
           host: out.smtpServer,
           port: Number(out.port),
@@ -179,6 +179,8 @@ const sendMailRoutes = (fastify, opts, done) => {
           .concat(bcc || [])
           .filter(Boolean);
 
+        const encodedBody = Buffer.from(finalBody, "utf-8").toString("base64");
+
         let message = [
           `From: ${fromHeader}`,
           `To: ${Array.isArray(to) ? to.join(", ") : to}`,
@@ -189,9 +191,9 @@ const sendMailRoutes = (fastify, opts, done) => {
           ``,
           `--${boundary}`,
           `Content-Type: text/html; charset="UTF-8"`,
-          `Content-Transfer-Encoding: quoted-printable`,
+          `Content-Transfer-Encoding: base64`,
           ``,
-          `${finalBody}`,
+          encodedBody,
         ]
           .filter(Boolean)
           .join("\r\n");
@@ -210,7 +212,7 @@ const sendMailRoutes = (fastify, opts, done) => {
                 att.mimeType || "application/octet-stream"
               }; name="${att.name}"`,
               `Content-Disposition: attachment; filename="${att.name}"`,
-              `Content-Transfer-Encoding: 7bit`,
+              `Content-Transfer-Encoding: base64`,
               ``,
               fileContent,
             ].join("\r\n");
