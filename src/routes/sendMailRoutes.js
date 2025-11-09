@@ -116,12 +116,16 @@ const sendMailRoutes = (fastify, opts, done) => {
 
           const secureLink = `${process.env.APP_URL}/secure/${secureId}`;
           finalBody = `
+<html>
+  <body style="font-family: Arial, sans-serif; color: #333;">
     <p>This email is protected.</p>
     <p>Click below to view it securely:</p>
-    <a href="${secureLink}">${secureLink}</a>
+    <a href="${secureLink}" style="color: #1a73e8; text-decoration: underline;">Open Secure Email</a>
     <br><br>
     <small>You'll need the password to open it.</small>
-  `;
+  </body>
+</html>
+`;
 
           attachments.length = 0;
         }
@@ -206,7 +210,7 @@ const sendMailRoutes = (fastify, opts, done) => {
                 att.mimeType || "application/octet-stream"
               }; name="${att.name}"`,
               `Content-Disposition: attachment; filename="${att.name}"`,
-              `Content-Transfer-Encoding: base64`,
+              `Content-Transfer-Encoding: 7bit`,
               ``,
               fileContent,
             ].join("\r\n");
